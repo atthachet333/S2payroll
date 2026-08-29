@@ -1,0 +1,12 @@
+-- AlterTable
+ALTER TABLE `payroll_deductions` MODIFY `kind` ENUM('BASE_SALARY', 'OT', 'ALLOWANCE', 'BONUS', 'COMMISSION', 'OTHER_INCOME', 'LATE', 'ABSENCE', 'SOCIAL_SECURITY', 'TAX', 'LOAN', 'OTHER_DEDUCTION') NOT NULL;
+
+-- AlterTable
+ALTER TABLE `payroll_employees` ADD COLUMN `commission_amount` DECIMAL(15, 2) NOT NULL DEFAULT 0,
+    ADD COLUMN `missing_check_in_days` INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN `missing_check_out_days` INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN `normal_hours` DECIMAL(8, 2) NOT NULL DEFAULT 0;
+
+-- AlterTable
+ALTER TABLE `payroll_incomes` MODIFY `kind` ENUM('BASE_SALARY', 'OT', 'ALLOWANCE', 'BONUS', 'COMMISSION', 'OTHER_INCOME', 'LATE', 'ABSENCE', 'SOCIAL_SECURITY', 'TAX', 'LOAN', 'OTHER_DEDUCTION') NOT NULL;
+
