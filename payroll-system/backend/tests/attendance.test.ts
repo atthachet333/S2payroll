@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeAttendanceMetrics } from '../src/services/attendance.service.js';
+import { EmploymentType } from '@prisma/client';
+import { computeAttendanceMetrics, evaluateMonthlyAttendance, monthlyRequiredCheckoutMinutes } from '../src/services/attendance.service.js';
 import { PayrollSettings } from '../src/services/settings.service.js';
 import { DEFAULT_SETTINGS_MAP } from '../src/config/payroll-defaults.js';
 import { parseSheetDate, parseSheetTime } from '../src/utils/datetime.js';
@@ -19,9 +20,26 @@ const base = {
 };
 
 describe('computeAttendanceMetrics', () => {
-  it('computes a normal 09:00-18:00 day as 8 paid hours', () => {
+  it('re-derives a formerly incomplete day as complete after a corrected checkout', () => {
+    const before = computeAttendanceMetrics({ ...base, checkIn: at(8, 0), checkOut: null }, settings());
+    const after = computeAttendanceMetrics({ ...base, checkIn: at(8, 0), checkOut: at(17, 0) }, settings());
+    expect(before.status).toBe('MISSING_DATA');
+    expect(after).toMatchObject({ status: 'NORMAL', isMissingCheckIn: false, isMissingCheckOut: false, workedMinutes: 480 });
+  });
+
+  it('uses current settings when recalculating an existing pair of effective punches', () => {
+    const punches = { ...base, checkIn: at(8, 0), checkOut: at(17, 0) };
+    expect(computeAttendanceMetrics(punches, settings({ BREAK_MINUTES: '60' })).workedMinutes).toBe(480);
+    expect(computeAttendanceMetrics(punches, settings({ BREAK_MINUTES: '30' })).workedMinutes).toBe(510);
+  });
+
+  it('approved leave is neither absent nor missing data when no punch is expected', () => {
+    const result = computeAttendanceMetrics({ ...base, isOnLeave: true, checkIn: null, checkOut: null }, settings());
+    expect(result).toMatchObject({ status: 'LEAVE', isAbsent: false, isMissingCheckIn: false, isMissingCheckOut: false });
+  });
+  it('computes a normal 08:00-17:00 day as 8 paid hours', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 0), checkOut: at(18, 0) },
+      { ...base, checkIn: at(8, 0), checkOut: at(17, 0) },
       settings()
     );
     // 9 hours elapsed minus a 60 minute break = 480 minutes
@@ -34,26 +52,25 @@ describe('computeAttendanceMetrics', () => {
 
   it('does not count arrival inside the grace period as late', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 14), checkOut: at(18, 0) },
+      { ...base, checkIn: at(8, 29), checkOut: at(17, 29) },
       settings()
     );
     expect(m.lateMinutes).toBe(0);
     expect(m.status).toBe('NORMAL');
   });
 
-  it('counts late minutes from the shift start once grace is exceeded', () => {
+  it('counts late minutes from the end of the flex window', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 30), checkOut: at(18, 0) },
+      { ...base, checkIn: at(8, 45), checkOut: at(17, 45) },
       settings()
     );
-    // Past the 15 minute grace, so the full 30 minutes count.
-    expect(m.lateMinutes).toBe(30);
+    expect(m.lateMinutes).toBe(15);
     expect(m.status).toBe('LATE');
   });
 
   it('counts hours beyond the standard day as OT', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 0), checkOut: at(20, 0) },
+      { ...base, checkIn: at(8, 0), checkOut: at(19, 0) },
       settings()
     );
     // 11h - 1h break = 600 minutes; 480 normal + 120 OT
@@ -64,7 +81,7 @@ describe('computeAttendanceMetrics', () => {
 
   it('ignores overtime shorter than MIN_OT_MINUTES', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 0), checkOut: at(18, 20) },
+      { ...base, checkIn: at(8, 0), checkOut: at(17, 20) },
       settings()
     );
     expect(m.otMinutes).toBe(0);
@@ -73,10 +90,11 @@ describe('computeAttendanceMetrics', () => {
 
   it('records early leave', () => {
     const m = computeAttendanceMetrics(
-      { ...base, checkIn: at(9, 0), checkOut: at(16, 0) },
+      { ...base, checkIn: at(8, 20), checkOut: at(17, 0) },
       settings()
     );
-    expect(m.earlyLeaveMinutes).toBe(120);
+    // Required checkout is a fixed 17:30, so leaving at 17:00 is 30 minutes early.
+    expect(m.earlyLeaveMinutes).toBe(30);
   });
 
   it('treats a whole holiday shift as overtime', () => {
@@ -187,7 +205,7 @@ describe('computeAttendanceMetrics', () => {
   it('honours a changed shift start time from settings', () => {
     const m = computeAttendanceMetrics(
       { ...base, checkIn: at(9, 30), checkOut: at(18, 0) },
-      settings({ WORK_START_TIME: '10:00' })
+      settings({ MONTHLY_WORK_START_TIME: '10:00' })
     );
     expect(m.lateMinutes).toBe(0);
   });
@@ -198,6 +216,166 @@ describe('computeAttendanceMetrics', () => {
       settings({ OT_ENABLED: 'false' })
     );
     expect(m.otMinutes).toBe(0);
+  });
+});
+
+describe('DAILY attendance policy', () => {
+  const daily = (checkIn: Date | null, checkOut: Date | null, overrides: Record<string, string> = {}) =>
+    computeAttendanceMetrics(
+      { ...base, checkIn, checkOut, employmentType: EmploymentType.DAILY },
+      settings(overrides)
+    );
+
+  it.each([
+    [9, 15, 12, 23, 188],
+    [15, 42, 17, 35, 113],
+    [8, 30, 14, 36, 366],
+  ])('counts %i:%i to %i:%i exactly with no lateness', (ih, im, oh, om, expected) => {
+    const result = daily(at(ih, im), at(oh, om));
+    expect(result.workedMinutes).toBe(expected);
+    expect(result.breakMinutes).toBe(0);
+    expect(result.lateMinutes).toBe(0);
+    expect(result.earlyLeaveMinutes).toBe(0);
+    expect(result.otMinutes).toBe(0);
+    expect(result.status).not.toBe('LATE');
+  });
+
+  it('deducts a break only when the explicit DAILY setting is enabled', () => {
+    expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'false' }).workedMinutes).toBe(366);
+    expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'true' }).workedMinutes).toBe(306);
+  });
+
+  it('calculates from displayed whole-minute punches even when source events contain seconds', () => {
+    const checkIn = new Date(Date.UTC(2027, 4, 12, 9, 15, 52));
+    const checkOut = new Date(Date.UTC(2027, 4, 12, 12, 23, 8));
+    expect(daily(checkIn, checkOut).workedMinutes).toBe(188);
+  });
+
+  it('still requires both punches', () => {
+    expect(daily(at(9, 15), null).status).toBe('MISSING_DATA');
+    expect(daily(null, at(12, 23)).status).toBe('MISSING_DATA');
+  });
+
+  it('does not turn a long DAILY shift or weekend work into OT without an explicit rule', () => {
+    expect(daily(at(8, 0), at(19, 0)).otMinutes).toBe(0);
+    const weekend = computeAttendanceMetrics(
+      { ...base, isWeekend: true, checkIn: at(8, 0), checkOut: at(19, 0), employmentType: EmploymentType.DAILY },
+      settings()
+    );
+    expect(weekend.otMinutes).toBe(0);
+    expect(weekend.status).toBe('NORMAL');
+  });
+});
+
+// The flexible-arrival window was withdrawn in the 2026 policy revision. The
+// monthly day is a fixed 08:30-17:30: lateness counts from 08:30 and the
+// required checkout no longer shifts with the arrival time.
+describe('MONTHLY fixed 08:30-17:30 policy', () => {
+  const monthly = (ih: number, im: number, oh: number, om: number) =>
+    computeAttendanceMetrics(
+      { ...base, checkIn: at(ih, im), checkOut: at(oh, om), employmentType: EmploymentType.MONTHLY },
+      settings()
+    );
+
+  it.each([
+    // arriving early no longer buys an early finish - 17:30 is required
+    [7, 45, 17, 30, 0, 0],
+    [8, 0, 17, 30, 0, 0],
+    [8, 10, 17, 30, 0, 0],
+    [8, 20, 17, 30, 0, 0],
+    [8, 30, 17, 30, 0, 0],
+    [8, 31, 17, 30, 1, 0],
+    [8, 46, 17, 30, 16, 0],
+    [8, 45, 17, 30, 15, 0],
+    [9, 0, 17, 30, 30, 0],
+    [9, 55, 17, 30, 85, 0],
+    // leaving before 17:30 is early leave regardless of when the day started
+    [8, 20, 17, 0, 0, 30],
+    [8, 30, 17, 10, 0, 20],
+  ])(
+    '%i:%i to %i:%i => late %i, early %i',
+    (ih, im, oh, om, late, early) => {
+      const result = monthly(ih, im, oh, om);
+      expect(result.lateMinutes).toBe(late);
+      expect(result.earlyLeaveMinutes).toBe(early);
+    }
+  );
+
+  it('fixes the required checkout at 17:30 whatever time the employee arrived', () => {
+    const current = settings();
+    expect(monthlyRequiredCheckoutMinutes(7 * 60 + 45, current)).toBe(17 * 60 + 30);
+    expect(monthlyRequiredCheckoutMinutes(8 * 60 + 10, current)).toBe(17 * 60 + 30);
+    expect(monthlyRequiredCheckoutMinutes(8 * 60 + 30, current)).toBe(17 * 60 + 30);
+    expect(monthlyRequiredCheckoutMinutes(9 * 60 + 30, current)).toBe(17 * 60 + 30);
+  });
+
+  it('uses one shared monthly evaluator for lateness from 08:30', () => {
+    const current = settings();
+    expect(evaluateMonthlyAttendance(8 * 60, null, current).lateMinutes).toBe(0);
+    expect(evaluateMonthlyAttendance(8 * 60 + 30, null, current).lateMinutes).toBe(0);
+    expect(evaluateMonthlyAttendance(8 * 60 + 31, null, current).lateMinutes).toBe(1);
+    expect(evaluateMonthlyAttendance(8 * 60 + 46, null, current).lateMinutes).toBe(16);
+    expect(evaluateMonthlyAttendance(9 * 60 + 55, null, current).lateMinutes).toBe(85);
+  });
+
+  it('does not fabricate MONTHLY OT from normal or extra unapproved time', () => {
+    expect(monthly(8, 0, 17, 0).otMinutes).toBe(0);
+    expect(monthly(8, 20, 17, 20).otMinutes).toBe(0);
+    expect(monthly(8, 30, 18, 0).otMinutes).toBe(0);
+    expect(monthly(7, 58, 17, 49).otMinutes).toBe(0);
+  });
+
+  it('keeps MONTHLY late, early leave, and OT categories independent', () => {
+    const monthlyWithOt = (ih: number, im: number, oh: number, om: number) =>
+      computeAttendanceMetrics(
+        {
+          ...base,
+          checkIn: at(ih, im),
+          checkOut: at(oh, om),
+          employmentType: EmploymentType.MONTHLY,
+        },
+        settings({ MONTHLY_OT_ENABLED: 'true', MIN_OT_MINUTES: '0' })
+      );
+
+    const lateNormal = monthly(8, 46, 17, 46);
+    expect(lateNormal.lateMinutes).toBe(16);
+    expect(lateNormal.earlyLeaveMinutes).toBe(0);
+    expect(lateNormal.otMinutes).toBe(0);
+
+    const lateWithQualifiedOt = monthlyWithOt(8, 46, 18, 30);
+    expect(lateWithQualifiedOt.lateMinutes).toBe(16);
+    expect(lateWithQualifiedOt.earlyLeaveMinutes).toBe(0);
+    expect(lateWithQualifiedOt.otMinutes).toBe(60);
+
+    const earlyArrivalAndLeave = monthlyWithOt(7, 30, 16, 30);
+    expect(earlyArrivalAndLeave.lateMinutes).toBe(0);
+    // 16:30 against the fixed 17:30 checkout is a full hour early.
+    expect(earlyArrivalAndLeave.earlyLeaveMinutes).toBe(60);
+    expect(earlyArrivalAndLeave.otMinutes).toBe(0);
+
+    // Arriving before 08:30 is not late, but it no longer shortens the day.
+    const earlyArrival = monthly(8, 20, 17, 20);
+    expect(earlyArrival.lateMinutes).toBe(0);
+    expect(earlyArrival.earlyLeaveMinutes).toBe(10);
+    expect(earlyArrival.otMinutes).toBe(0);
+
+    const earlyArrivalEarlyLeave = monthly(8, 20, 17, 0);
+    expect(earlyArrivalEarlyLeave.lateMinutes).toBe(0);
+    expect(earlyArrivalEarlyLeave.earlyLeaveMinutes).toBe(30);
+    expect(earlyArrivalEarlyLeave.otMinutes).toBe(0);
+  });
+
+  it('uses changed settings during recalculation', () => {
+    const result = computeAttendanceMetrics(
+      { ...base, checkIn: at(9, 15), checkOut: at(18, 15), employmentType: EmploymentType.MONTHLY },
+      settings({
+        MONTHLY_WORK_START_TIME: '09:00',
+        MONTHLY_WORK_END_TIME: '18:00',
+        MONTHLY_FLEX_ARRIVAL_MINUTES: '20',
+      })
+    );
+    expect(result.lateMinutes).toBe(0);
+    expect(result.earlyLeaveMinutes).toBe(0);
   });
 });
 

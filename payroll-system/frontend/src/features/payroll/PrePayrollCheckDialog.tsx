@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { AlertOctagon, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
 import { payrollApi } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
@@ -48,6 +49,7 @@ export default function PrePayrollCheckDialog({
   calculating: boolean;
   canCalculate: boolean;
 }) {
+  const navigate = useNavigate();
   const query = useQuery({
     queryKey: ['pre-payroll-check', periodId],
     queryFn: () => payrollApi.preCheck(periodId),
@@ -121,6 +123,15 @@ export default function PrePayrollCheckDialog({
                                 </li>
                               )}
                             </ul>
+                          )}
+                          {['MISSING_MONTHLY_SALARY', 'MISSING_HOURLY_RATE', 'MISSING_PAY_PROFILE_FOR_DATE_RANGE', 'DAILY_RATE_UNCONFIGURED', 'DAILY_RATE_DATE_RANGE_UNCONFIGURED'].includes(f.code) && (
+                            <Button size="sm" variant="outline" className="mt-2" onClick={() => { onOpenChange(false); navigate('/payroll-settings'); }}>ไปกำหนดค่าจ้าง</Button>
+                          )}
+                          {f.code === 'NO_ATTENDANCE' && (
+                            <Button size="sm" variant="outline" className="mt-2" onClick={() => { onOpenChange(false); navigate('/attendance'); }}>ไปบันทึกการลงเวลา</Button>
+                          )}
+                          {f.code === 'MISSING_PUNCH' && (
+                            <Button size="sm" variant="outline" className="mt-2" onClick={() => { onOpenChange(false); navigate('/attendance?status=MISSING_DATA'); }}>แก้ไขเวลา</Button>
                           )}
                         </div>
                       </div>

@@ -8,6 +8,8 @@ import type {
   Company,
   Department,
   Employee,
+  EmployeePayProfile,
+  EmployeePayConfiguration,
   Holiday,
   LeaveRecord,
   Overview,
@@ -26,6 +28,7 @@ import type {
   SessionUser,
   SyncHistoryItem,
   SyncResult,
+  WorkScheduleProfile,
 } from '@/types';
 
 /** Typed wrappers over every REST endpoint the UI consumes. */
@@ -62,12 +65,28 @@ export interface EmployeeQuery {
   departmentId?: string;
   status?: string;
   employmentType?: string;
+  /** Master-data completeness, evaluated by the backend. */
+  completeness?: 'COMPLETE' | 'INCOMPLETE';
+}
+
+export interface EmployeeCompletenessSummary {
+  total: number;
+  complete: number;
+  incomplete: number;
+  incompleteEmployees: Array<{
+    employeeCode: string;
+    name: string;
+    missingCount: number;
+    missingLabels: string[];
+  }>;
 }
 
 export const employeeApi = {
   list: (params: EmployeeQuery) =>
     unwrap<Paginated<Employee>>(api.get('/api/employees', { params })),
   get: (id: string) => unwrap<Employee>(api.get(`/api/employees/${id}`)),
+  completenessSummary: () =>
+    unwrap<EmployeeCompletenessSummary>(api.get('/api/employees/completeness-summary')),
   summary: (id: string, params?: { from?: string; to?: string }) =>
     unwrap<{
       employee: Employee;
@@ -87,6 +106,12 @@ export const employeeApi = {
     unwrap<Employee>(api.patch(`/api/employees/${id}`, data)),
   deactivate: (id: string, reason: string) =>
     unwrap<Employee>(api.post(`/api/employees/${id}/deactivate`, { reason })),
+  payProfiles: (id: string) =>
+    unwrap<EmployeePayProfile[]>(api.get(`/api/employees/${id}/pay-profiles`)),
+  attendance: (id: string, params: { year: number; month: number; page?: number; pageSize?: number; status?: string }) =>
+    unwrap<Paginated<AttendanceRecord>>(api.get(`/api/employees/${id}/attendance`, { params })),
+  createPayProfile: (id: string, data: Record<string, unknown>) =>
+    unwrap<EmployeePayProfile>(api.post(`/api/employees/${id}/pay-profiles`, data)),
 };
 
 // --- attendance --------------------------------------------------------------
@@ -99,6 +124,7 @@ export interface AttendanceQuery {
   from?: string;
   to?: string;
   status?: string;
+  employmentType?: string;
   search?: string;
 }
 
@@ -108,19 +134,140 @@ export const attendanceApi = {
   get: (id: string) => unwrap<AttendanceRecord>(api.get(`/api/attendance/${id}`)),
   summary: (params: { from?: string; to?: string; departmentId?: string }) =>
     unwrap<AttendanceSummary>(api.get('/api/attendance/summary', { params })),
+  calendar: (year: number, month: number) =>
+    unwrap<WorkCalendar>(api.get('/api/attendance/calendar', { params: { year, month } })),
   correct: (
     id: string,
     data: { checkIn?: string | null; checkOut?: string | null; status?: string; note?: string | null; reason: string }
   ) => unwrap<AttendanceRecord>(api.patch(`/api/attendance/${id}`, data)),
   recalculate: (from: string, to: string) =>
-    unwrap<{ updated: number }>(api.post('/api/attendance/recalculate', { from, to })),
+    unwrap<{ updated: number; skippedLocked: number }>(api.post('/api/attendance/recalculate', { from, to })),
+  /** Removes the day from payroll only. The Google Sheet is never written to. */
+  remove: (id: string, reason: string) =>
+    unwrap<{ deleted: boolean; suppressed: boolean }>(
+      api.delete(`/api/attendance/${id}`, { data: { reason } })
+    ),
+  dayDetail: (date: string) =>
+    unwrap<CalendarDayDetail>(api.get(`/api/attendance/calendar/${date}`)),
+  suppressions: () => unwrap<AttendanceSuppression[]>(api.get('/api/attendance/suppressions')),
+  restore: (id: string) =>
+    unwrap<{ restored: boolean }>(api.delete(`/api/attendance/suppressions/${id}`)),
 };
 
+export interface WorkCalendarDay {
+  date: string;
+  dayType: 'WORKING_DAY' | 'WEEKLY_OFF' | 'HOLIDAY' | 'PUBLIC_HOLIDAY' | 'COMPANY_HOLIDAY';
+  holidayName: string | null;
+  isToday: boolean;
+  summaryCount: number;
+  lateCount: number;
+  leaveCount: number;
+  hasActivity: boolean;
+  approvedLeaveCount: number;
+  payrollPeriods: Array<{ id: string; name: string; status: string }>;
+}
+
+export interface CheckoutSummary {
+  employeeCode: string;
+  employeeName: string | null;
+  checkOutTime: string;
+  text: string;
+  eventId: string;
+  suppressed: boolean;
+}
+
+export interface CalendarDayDetail {
+  date: string;
+  dayType: 'WORKING_DAY' | 'WEEKLY_OFF' | 'HOLIDAY' | 'PUBLIC_HOLIDAY' | 'COMPANY_HOLIDAY';
+  holidayName: string | null;
+  holidayNote?: string | null;
+  summaries: CheckoutSummary[];
+  suppressedSummaries: CheckoutSummary[];
+  late: Array<{
+    employeeCode: string;
+    employeeName: string;
+    checkIn: string | null;
+    lateMinutes: number;
+  }>;
+  leaves: Array<{
+    employeeCode: string;
+    employeeName: string;
+    leaveType: string;
+    startDate: string;
+    endDate: string;
+    reason: string | null;
+  }>;
+  counts: { summaryCount: number; lateCount: number; leaveCount: number };
+}
+
+export interface AttendanceSuppression {
+  id: string;
+  employeeCode: string;
+  workDate: string;
+  reason: string;
+  createdAt: string;
+  employee?: { employeeCode: string; firstName: string; lastName: string };
+}
+
+export interface WorkCalendar {
+  year: number;
+  month: number;
+  days: WorkCalendarDay[];
+  summary: {
+    scheduledWorkingDays: number;
+    elapsedWorkingDays: number;
+    remainingWorkingDays: number;
+    weeklyOffDays: number;
+    publicHolidays: number;
+    companyHolidays: number;
+  };
+}
+
 // --- google sheets -----------------------------------------------------------
+
+export interface AutoSyncSourceStatus {
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastSuccessfulAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorSummary: string | null;
+  lastCounts: Record<string, number> | null;
+}
+
+export interface AutoSyncStatus {
+  enabled: boolean;
+  running: boolean;
+  intervalSeconds: number;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastSuccessfulAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorSummary: string | null;
+  skippedBecauseBusy: number;
+  cyclesRun: number;
+  sources: Record<'employees' | 'attendance' | 'leave', AutoSyncSourceStatus>;
+}
+
+/**
+ * How often each page re-reads the database. The browser never talks to Google;
+ * the backend scheduler keeps the database current and these only poll our own
+ * API. Payroll pages are deliberately absent - refreshing stored figures is
+ * fine, recalculating them automatically is not.
+ */
+export const POLL_INTERVAL_MS = {
+  attendance: 30_000,
+  calendar: 45_000,
+  overview: 60_000,
+  employees: 60_000,
+  leave: 60_000,
+  autoSyncStatus: 15_000,
+} as const;
 
 export const sheetsApi = {
   sync: (data: { sheetId?: string; range?: string; dryRun?: boolean }) =>
     unwrap<SyncResult>(api.post('/api/sheets/sync', data)),
+  autoSyncStatus: () => unwrap<AutoSyncStatus>(api.get('/api/sheets/auto-sync/status')),
+  syncAll: () => unwrap<AutoSyncStatus>(api.post('/api/sheets/sync-all')),
   status: () =>
     unwrap<{
       configured: boolean;
@@ -130,6 +277,15 @@ export const sheetsApi = {
     }>(api.get('/api/sheets/status')),
   history: (params: { page?: number; pageSize?: number }) =>
     unwrap<Paginated<SyncHistoryItem>>(api.get('/api/sheets/history', { params })),
+  previewLeaves: () => unwrap<{
+    tab: string; totalSheetRows: number; counts: Record<string, number>;
+    importable: boolean; blockers: string[];
+    rows: Array<{ sheetRow: number; requestId: string; employeeCode: string; leaveType: string; startDate: string | null; endDate: string | null; status: string | null; action: string; errors: string[] }>;
+  }>(api.get('/api/sheets/leaves/preview')),
+  syncLeaves: () => unwrap<{
+    created: number; updated: number; unchanged: number;
+    attendanceCreated: number; attendanceRecalculated: number; attendanceSkippedLocked: number;
+  }>(api.post('/api/sheets/leaves/sync')),
 };
 
 // --- payroll -----------------------------------------------------------------
@@ -219,6 +375,8 @@ export const settingsApi = {
     unwrap<PayrollSetting[]>(api.get('/api/settings', { params: group ? { group } : {} })),
   update: (settings: { key: string; value: string }[]) =>
     unwrap<PayrollSetting[]>(api.patch('/api/settings', { settings })),
+  payConfigurations: () =>
+    unwrap<EmployeePayConfiguration[]>(api.get('/api/settings/pay-configurations')),
 
   getCompany: () => unwrap<Company | null>(api.get('/api/settings/company')),
   saveCompany: (data: Record<string, unknown>) =>
@@ -250,8 +408,10 @@ export const settingsApi = {
     unwrap<Paginated<AuditLog>>(api.get('/api/settings/audit-logs', { params })),
 
   listHolidays: () => unwrap<Holiday[]>(api.get('/api/settings/holidays')),
-  createHoliday: (data: { date: string; name: string; isPaid: boolean }) =>
+  createHoliday: (data: { date: string; name: string; type: Holiday['type']; note?: string | null; isPaid: boolean }) =>
     unwrap<Holiday>(api.post('/api/settings/holidays', data)),
+  updateHoliday: (id: string, data: Partial<{ date: string; name: string; type: Holiday['type']; note: string | null; isPaid: boolean }>) =>
+    unwrap<Holiday>(api.patch(`/api/settings/holidays/${id}`, data)),
   deleteHoliday: (id: string) =>
     unwrap<{ success: boolean }>(api.delete(`/api/settings/holidays/${id}`)),
 
@@ -259,4 +419,7 @@ export const settingsApi = {
     unwrap<LeaveRecord[]>(api.get('/api/settings/leaves', { params: employeeId ? { employeeId } : {} })),
   createLeave: (data: Record<string, unknown>) =>
     unwrap<LeaveRecord>(api.post('/api/settings/leaves', data)),
+  listWorkSchedules: () => unwrap<WorkScheduleProfile[]>(api.get('/api/settings/work-schedules')),
+  createWorkSchedule: (data: Record<string, unknown>) =>
+    unwrap<WorkScheduleProfile>(api.post('/api/settings/work-schedules', data)),
 };

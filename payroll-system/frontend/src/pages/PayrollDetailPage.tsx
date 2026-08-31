@@ -181,6 +181,7 @@ export default function PayrollDetailPage() {
   const [unlockReason, setUnlockReason] = React.useState('');
   const [reviewOpen, setReviewOpen] = React.useState(false);
   const [preCheckOpen, setPreCheckOpen] = React.useState(false);
+  const [checkingReadiness, setCheckingReadiness] = React.useState(false);
   const [downloadingZip, setDownloadingZip] = React.useState(false);
 
   const downloadAll = React.useCallback(async () => {
@@ -206,6 +207,12 @@ export default function PayrollDetailPage() {
     queryKey: ['payroll-period', periodId],
     queryFn: () => payrollApi.getPeriod(periodId),
     enabled: Boolean(periodId),
+  });
+  const readinessQuery = useQuery({
+    queryKey: ['pre-payroll-check', periodId],
+    queryFn: () => payrollApi.preCheck(periodId),
+    enabled: Boolean(periodId),
+    staleTime: 15_000,
   });
 
   // Unfiltered roster for the employee dropdown, so picking a person does not
@@ -277,12 +284,29 @@ export default function PayrollDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ['payroll-periods'] });
       void queryClient.invalidateQueries({ queryKey: ['payslips'] });
       void queryClient.invalidateQueries({ queryKey: ['overview'] });
+      void queryClient.invalidateQueries({ queryKey: ['pre-payroll-check', periodId] });
     },
     onError: (err) => {
       toast.error(apiErrorMessage(err));
       setPendingAction(null);
     },
   });
+
+  const calculateWhenReady = async () => {
+    setCheckingReadiness(true);
+    try {
+      const report = await payrollApi.preCheck(periodId);
+      if (report.canCalculate) {
+        actionMutation.mutate('calculate');
+      } else {
+        setPreCheckOpen(true);
+      }
+    } catch (error) {
+      toast.error(apiErrorMessage(error));
+    } finally {
+      setCheckingReadiness(false);
+    }
+  };
 
   if (periodQuery.isLoading) {
     return (
@@ -314,7 +338,8 @@ export default function PayrollDetailPage() {
   const locked = period.status === 'LOCKED';
 
   const availableActions = ACTIONS.filter(
-    (action) => action.availableIn.includes(period.status) && can(action.permission)
+    (action) => action.availableIn.includes(period.status) && can(action.permission) &&
+      !(readinessQuery.data?.isPreview && ['approve', 'mark-paid', 'lock'].includes(action.key))
   );
 
   return (
@@ -336,7 +361,7 @@ export default function PayrollDetailPage() {
             <PeriodStatusBadge status={period.status} />
 
             {/* Final Review replaces a bare "approve" button while in REVIEW. */}
-            {period.status === 'REVIEW' && can('payroll:read') && (
+            {period.status === 'REVIEW' && can('payroll:read') && !readinessQuery.data?.isPreview && (
               <Button variant="default" onClick={() => setReviewOpen(true)}>
                 <ClipboardCheck className="h-4 w-4" />
                 ตรวจสอบครั้งสุดท้าย
@@ -355,9 +380,11 @@ export default function PayrollDetailPage() {
                 key={action.key}
                 variant={action.variant}
                 onClick={() =>
-                  action.key === 'calculate' ? setPreCheckOpen(true) : setPendingAction(action)
+                  action.key === 'calculate' ? void calculateWhenReady() : setPendingAction(action)
                 }
-                loading={actionMutation.isPending && pendingAction?.key === action.key}
+                loading={action.key === 'calculate'
+                  ? checkingReadiness || (actionMutation.isPending && !pendingAction)
+                  : actionMutation.isPending && pendingAction?.key === action.key}
               >
                 {action.icon}
                 {action.label}
@@ -374,6 +401,22 @@ export default function PayrollDetailPage() {
             รอบเงินเดือนนี้ถูกล็อกแล้วเมื่อ {formatDate(period.lockedAt)} —
             ข้อมูลทางการเงินและการลงเวลาในรอบนี้ไม่สามารถแก้ไขได้
           </span>
+        </div>
+      )}
+
+      {readinessQuery.data?.isPreview && (
+        <div className="mb-4 rounded-lg border border-info/30 bg-info/10 px-4 py-3 text-sm text-info">
+          <span className="font-semibold">ประมาณการ — รอบเงินเดือนยังไม่สิ้นสุด</span>
+          <span className="ml-2">คำนวณเพื่อตรวจสอบได้ แต่ยังไม่สามารถอนุมัติ จ่าย หรือล็อก</span>
+        </div>
+      )}
+
+      {readinessQuery.data && (
+        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="พร้อมคำนวณ" value={`${readinessQuery.data.readiness.ready} คน`} tone="success" />
+          <StatCard label="ยังขาดค่าจ้าง" value={`${readinessQuery.data.readiness.missingPay} คน`} tone="warning" />
+          <StatCard label="ข้อมูลเวลาไม่ครบ" value={`${readinessQuery.data.readiness.incompleteAttendance} คน`} tone="danger" />
+          <StatCard label="กำลังทำงานวันนี้" value={`${readinessQuery.data.readiness.inProgressToday} คน`} tone="info" />
         </div>
       )}
 
@@ -595,7 +638,7 @@ export default function PayrollDetailPage() {
               value={unlockReason}
               onChange={(e) => setUnlockReason(e.target.value)}
               rows={3}
-              placeholder="เช่น พบข้อผิดพลาดในการคำนวณ OT ของพนักงาน EMP005"
+              placeholder="เช่น พบข้อผิดพลาดในการคำนวณ OT ของพนักงาน S2A005"
             />
           </Field>
         )}

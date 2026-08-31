@@ -33,6 +33,16 @@ enum EmploymentType {
   CONTRACT
 }
 
+enum PayType {
+  MONTHLY
+  HOURLY
+}
+
+enum HolidayType {
+  PUBLIC_HOLIDAY
+  COMPANY_HOLIDAY
+}
+
 enum EmployeeStatus {
   ACTIVE
   INACTIVE
@@ -139,21 +149,21 @@ model Role {
 }
 
 model User {
-  id           String    @id @default(uuid()) @db.Char(36)
-  email        String    @unique @db.VarChar(191)
-  passwordHash String    @map("password_hash") @db.VarChar(255)
-  firstName    String    @map("first_name") @db.VarChar(100)
-  lastName     String    @map("last_name") @db.VarChar(100)
-  roleId       String    @map("role_id") @db.Char(36)
-  isActive     Boolean   @default(true) @map("is_active")
+  id                 String    @id @default(uuid()) @db.Char(36)
+  email              String    @unique @db.VarChar(191)
+  passwordHash       String    @map("password_hash") @db.VarChar(255)
+  firstName          String    @map("first_name") @db.VarChar(100)
+  lastName           String    @map("last_name") @db.VarChar(100)
+  roleId             String    @map("role_id") @db.Char(36)
+  isActive           Boolean   @default(true) @map("is_active")
   /// Forces a password change before the account can be used. Set on the
   /// bootstrap admin created by the seed, cleared once the password is changed.
-  mustChangePassword Boolean @default(false) @map("must_change_password")
-  lastLoginAt  DateTime? @map("last_login_at")
-  employeeId   String?   @unique @map("employee_id") @db.Char(36)
-  createdBy    String?   @map("created_by") @db.Char(36)
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  mustChangePassword Boolean   @default(false) @map("must_change_password")
+  lastLoginAt        DateTime? @map("last_login_at")
+  employeeId         String?   @unique @map("employee_id") @db.Char(36)
+  createdBy          String?   @map("created_by") @db.Char(36)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   role          Role           @relation(fields: [roleId], references: [id])
   employee      Employee?      @relation(fields: [employeeId], references: [id])
@@ -236,46 +246,71 @@ model Position {
 // ---------------------------------------------------------------------------
 
 model Employee {
-  id             String         @id @default(uuid()) @db.Char(36)
-  employeeCode   String         @unique @map("employee_code") @db.VarChar(32)
-  firstName      String         @map("first_name") @db.VarChar(100)
-  lastName       String         @map("last_name") @db.VarChar(100)
-  nickname       String?        @db.VarChar(64)
-  nationalId     String?        @map("national_id") @db.VarChar(32)
-  email          String?        @db.VarChar(191)
-  phone          String?        @db.VarChar(32)
-  departmentId   String?        @map("department_id") @db.Char(36)
-  positionId     String?        @map("position_id") @db.Char(36)
-  employmentType EmploymentType @default(MONTHLY) @map("employment_type")
-  startDate      DateTime       @map("start_date") @db.Date
-  endDate        DateTime?      @map("end_date") @db.Date
-  baseSalary     Decimal        @default(0) @map("base_salary") @db.Decimal(15, 2)
-  bankName       String?        @map("bank_name") @db.VarChar(100)
-  bankAccount    String?        @map("bank_account") @db.VarChar(64)
-  taxId          String?        @map("tax_id") @db.VarChar(32)
-  socialSecurity String?        @map("social_security") @db.VarChar(32)
-  ssoEnabled     Boolean        @default(true) @map("sso_enabled")
-  taxEnabled     Boolean        @default(true) @map("tax_enabled")
-  otEligible     Boolean        @default(true) @map("ot_eligible")
-  status         EmployeeStatus @default(ACTIVE)
-  note           String?        @db.VarChar(500)
-  createdBy      String?        @map("created_by") @db.Char(36)
-  createdAt      DateTime       @default(now()) @map("created_at")
-  updatedAt      DateTime       @updatedAt @map("updated_at")
+  id                    String         @id @default(uuid()) @db.Char(36)
+  employeeCode          String         @unique @map("employee_code") @db.VarChar(32)
+  firstName             String         @map("first_name") @db.VarChar(100)
+  lastName              String         @map("last_name") @db.VarChar(100)
+  nickname              String?        @db.VarChar(64)
+  nationalId            String?        @map("national_id") @db.VarChar(32)
+  email                 String?        @db.VarChar(191)
+  phone                 String?        @db.VarChar(32)
+  departmentId          String?        @map("department_id") @db.Char(36)
+  positionId            String?        @map("position_id") @db.Char(36)
+  employmentType        EmploymentType @default(MONTHLY) @map("employment_type")
+  startDate             DateTime       @map("start_date") @db.Date
+  endDate               DateTime?      @map("end_date") @db.Date
+  baseSalary            Decimal        @default(0) @map("base_salary") @db.Decimal(15, 2)
+  bankName              String?        @map("bank_name") @db.VarChar(100)
+  bankAccount           String?        @map("bank_account") @db.VarChar(64)
+  taxId                 String?        @map("tax_id") @db.VarChar(32)
+  socialSecurity        String?        @map("social_security") @db.VarChar(32)
+  ssoEnabled            Boolean        @default(true) @map("sso_enabled")
+  taxEnabled            Boolean        @default(true) @map("tax_enabled")
+  otEligible            Boolean        @default(true) @map("ot_eligible")
+  attendanceRequired    Boolean        @default(true) @map("attendance_required")
+  leaveTrackingRequired Boolean        @default(true) @map("leave_tracking_required")
+  status                EmployeeStatus @default(ACTIVE)
+  note                  String?        @db.VarChar(500)
+  createdBy             String?        @map("created_by") @db.Char(36)
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
 
-  department        Department?        @relation(fields: [departmentId], references: [id])
-  position          Position?          @relation(fields: [positionId], references: [id])
-  user              User?
-  attendanceRecords AttendanceRecord[]
-  leaveRecords      LeaveRecord[]
-  payrollEmployees  PayrollEmployee[]
-  salaryHistory     SalaryHistory[]
-  payslips          Payslip[]
+  department             Department?             @relation(fields: [departmentId], references: [id])
+  position               Position?               @relation(fields: [positionId], references: [id])
+  user                   User?
+  attendanceRecords      AttendanceRecord[]
+  attendanceSuppressions AttendanceSuppression[]
+  leaveRecords           LeaveRecord[]
+  payrollEmployees       PayrollEmployee[]
+  salaryHistory          SalaryHistory[]
+  payProfiles            EmployeePayProfile[]
+  payslips               Payslip[]
 
   @@index([departmentId])
   @@index([positionId])
   @@index([status])
   @@map("employees")
+}
+
+model EmployeePayProfile {
+  id            String    @id @default(uuid()) @db.Char(36)
+  employeeId    String    @map("employee_id") @db.Char(36)
+  payType       PayType   @map("pay_type")
+  monthlySalary Decimal?  @map("monthly_salary") @db.Decimal(15, 2)
+  hourlyRate    Decimal?  @map("hourly_rate") @db.Decimal(15, 2)
+  effectiveFrom DateTime  @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+  isActive      Boolean   @default(true) @map("is_active")
+  createdBy     String?   @map("created_by") @db.Char(36)
+  updatedBy     String?   @map("updated_by") @db.Char(36)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, effectiveFrom], name: "employee_pay_effective_from")
+  @@index([employeeId, isActive, effectiveFrom])
+  @@map("employee_pay_profiles")
 }
 
 model SalaryHistory {
@@ -310,7 +345,7 @@ model AttendanceRawData {
   rawCheckOut  String?  @map("raw_check_out") @db.VarChar(64)
   /// Stable source-event identity. Unique so repeated syncs cannot archive the
   /// same Google Sheet event more than once.
-  rowHash      String   @unique @map("row_hash") @db.VarChar(64)
+  rowHash      String   @map("row_hash") @db.VarChar(64)
   sheetRow     Int?     @map("sheet_row")
   payload      Json?
   createdAt    DateTime @default(now()) @map("created_at")
@@ -353,16 +388,21 @@ model AttendanceRecord {
   isHoliday         Boolean @default(false) @map("is_holiday")
   isWeekend         Boolean @default(false) @map("is_weekend")
 
-  status      AttendanceStatus @default(NORMAL)
-  source      AttendanceSource @default(GOOGLE_SHEET)
-  isCorrected Boolean          @default(false) @map("is_corrected")
-  isLocked    Boolean          @default(false) @map("is_locked")
-  note        String?          @db.VarChar(500)
-  rawDataId   String?          @map("raw_data_id") @db.Char(36)
-  lastSyncId  String?          @map("last_sync_id") @db.Char(36)
-  createdBy   String?          @map("created_by") @db.Char(36)
-  createdAt   DateTime         @default(now()) @map("created_at")
-  updatedAt   DateTime         @updatedAt @map("updated_at")
+  status         AttendanceStatus @default(NORMAL)
+  source         AttendanceSource @default(GOOGLE_SHEET)
+  isCorrected    Boolean          @default(false) @map("is_corrected")
+  /// True only when a human explicitly chose the status, as opposed to editing
+  /// the punches. is_corrected alone cannot express that difference, and using
+  /// it to freeze the status left a corrected day stuck on its pre-correction
+  /// status through any later recalculation.
+  statusOverride Boolean          @default(false) @map("status_override")
+  isLocked       Boolean          @default(false) @map("is_locked")
+  note           String?          @db.VarChar(500)
+  rawDataId      String?          @map("raw_data_id") @db.Char(36)
+  lastSyncId     String?          @map("last_sync_id") @db.Char(36)
+  createdBy      String?          @map("created_by") @db.Char(36)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
 
   employee    Employee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
   rawData     AttendanceRawData?     @relation(fields: [rawDataId], references: [id])
@@ -410,6 +450,10 @@ model LeaveRecord {
   createdAt  DateTime    @default(now()) @map("created_at")
   updatedAt  DateTime    @updatedAt @map("updated_at")
 
+  /// requestId from the LeaveRequests sheet. Unique so a repeated sync updates
+  /// the existing row instead of appending a duplicate leave.
+  sourceRequestId String? @unique @map("source_request_id") @db.VarChar(64)
+
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
   @@index([employeeId, startDate, endDate])
@@ -417,16 +461,67 @@ model LeaveRecord {
   @@map("leave_records")
 }
 
+/// A workday a human deliberately removed from the payroll system.
+///
+/// The Google Sheet stays the source of truth and is read-only, so an ordinary
+/// delete would simply be re-imported on the next sync. This table records the
+/// intent to exclude one (employee, date) from effective attendance; the sync
+/// consults it and skips those days. Raw source events are never removed, so
+/// the original evidence and any checkout summary remain auditable.
+///
+/// Removing the row restores the day: the next sync re-imports it normally.
+model AttendanceSuppression {
+  id               String    @id @default(uuid()) @db.Char(36)
+  employeeId       String    @map("employee_id") @db.Char(36)
+  employeeCode     String    @map("employee_code") @db.VarChar(32)
+  workDate         DateTime  @map("work_date") @db.Date
+  reason           String    @db.VarChar(500)
+  /// Effective punches at the moment of deletion, kept for the audit trail.
+  previousCheckIn  DateTime? @map("previous_check_in")
+  previousCheckOut DateTime? @map("previous_check_out")
+  createdBy        String?   @map("created_by") @db.Char(36)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, workDate], name: "employee_work_date")
+  @@index([workDate])
+  @@map("attendance_suppressions")
+}
+
 model Holiday {
-  id        String   @id @default(uuid()) @db.Char(36)
-  date      DateTime @unique @db.Date
-  name      String   @db.VarChar(191)
-  isPaid    Boolean  @default(true) @map("is_paid")
-  createdBy String?  @map("created_by") @db.Char(36)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id        String      @id @default(uuid()) @db.Char(36)
+  date      DateTime    @unique @db.Date
+  name      String      @db.VarChar(191)
+  type      HolidayType @default(COMPANY_HOLIDAY)
+  note      String?     @db.VarChar(500)
+  isPaid    Boolean     @default(true) @map("is_paid")
+  createdBy String?     @map("created_by") @db.Char(36)
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
 
   @@map("holidays")
+}
+
+model WorkScheduleProfile {
+  id                 String    @id @default(uuid()) @db.Char(36)
+  name               String    @db.VarChar(191)
+  effectiveFrom      DateTime  @map("effective_from") @db.Date
+  effectiveTo        DateTime? @map("effective_to") @db.Date
+  workingDays        String    @map("working_days") @db.VarChar(64)
+  workStartTime      String    @map("work_start_time") @db.VarChar(5)
+  workEndTime        String    @map("work_end_time") @db.VarChar(5)
+  flexArrivalMinutes Int       @default(0) @map("flex_arrival_minutes")
+  isActive           Boolean   @default(true) @map("is_active")
+  createdBy          String?   @map("created_by") @db.Char(36)
+  updatedBy          String?   @map("updated_by") @db.Char(36)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@unique([effectiveFrom])
+  @@index([isActive, effectiveFrom, effectiveTo])
+  @@map("work_schedule_profiles")
 }
 
 // ---------------------------------------------------------------------------
@@ -484,24 +579,24 @@ model PayrollEmployee {
   employmentType EmploymentType @map("employment_type")
 
   /// Calendar working days in the period (weekdays that are not public holidays).
-  workingDays     Int     @default(0) @map("working_days")
+  workingDays         Int     @default(0) @map("working_days")
   /// Days the employee actually recorded work on.
-  presentDays     Int     @default(0) @map("present_days")
-  absentDays      Int     @default(0) @map("absent_days")
-  leaveDays       Decimal @default(0) @map("leave_days") @db.Decimal(6, 2)
-  lateCount       Int     @default(0) @map("late_count")
-  lateMinutes     Int     @default(0) @map("late_minutes")
-  workingHours    Decimal @default(0) @map("working_hours") @db.Decimal(8, 2)
+  presentDays         Int     @default(0) @map("present_days")
+  absentDays          Int     @default(0) @map("absent_days")
+  leaveDays           Decimal @default(0) @map("leave_days") @db.Decimal(6, 2)
+  lateCount           Int     @default(0) @map("late_count")
+  lateMinutes         Int     @default(0) @map("late_minutes")
+  workingHours        Decimal @default(0) @map("working_hours") @db.Decimal(8, 2)
   /// Paid hours up to the standard working day, excluding overtime.
-  normalHours     Decimal @default(0) @map("normal_hours") @db.Decimal(8, 2)
-  otHours         Decimal @default(0) @map("ot_hours") @db.Decimal(8, 2)
-  otWeekdayHours  Decimal @default(0) @map("ot_weekday_hours") @db.Decimal(8, 2)
-  otWeekendHours  Decimal @default(0) @map("ot_weekend_hours") @db.Decimal(8, 2)
-  otHolidayHours  Decimal @default(0) @map("ot_holiday_hours") @db.Decimal(8, 2)
-  missingDataDays Int     @default(0) @map("missing_data_days")
+  normalHours         Decimal @default(0) @map("normal_hours") @db.Decimal(8, 2)
+  otHours             Decimal @default(0) @map("ot_hours") @db.Decimal(8, 2)
+  otWeekdayHours      Decimal @default(0) @map("ot_weekday_hours") @db.Decimal(8, 2)
+  otWeekendHours      Decimal @default(0) @map("ot_weekend_hours") @db.Decimal(8, 2)
+  otHolidayHours      Decimal @default(0) @map("ot_holiday_hours") @db.Decimal(8, 2)
+  missingDataDays     Int     @default(0) @map("missing_data_days")
   /// Days with a missing punch, tracked separately so review can see which side is absent.
-  missingCheckInDays  Int @default(0) @map("missing_check_in_days")
-  missingCheckOutDays Int @default(0) @map("missing_check_out_days")
+  missingCheckInDays  Int     @default(0) @map("missing_check_in_days")
+  missingCheckOutDays Int     @default(0) @map("missing_check_out_days")
 
   baseSalary       Decimal @default(0) @map("base_salary") @db.Decimal(15, 2)
   otAmount         Decimal @default(0) @map("ot_amount") @db.Decimal(15, 2)

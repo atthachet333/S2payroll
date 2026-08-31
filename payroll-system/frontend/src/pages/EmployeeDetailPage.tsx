@@ -1,4 +1,5 @@
 import * as React from 'react';
+import dayjs from 'dayjs';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Pencil } from 'lucide-react';
@@ -17,6 +18,8 @@ import {
   ErrorState,
   InfoRow,
   PageHeader,
+  Pagination,
+  Select,
   Skeleton,
   Tabs,
   TabsContent,
@@ -24,17 +27,34 @@ import {
   TabsTrigger,
 } from '@/components/ui';
 import { EmployeeStatusBadge, EMPLOYMENT_TYPE_LABELS } from '@/components/StatusBadge';
-import { formatDate, formatMinutes, formatMoney, formatNumber } from '@/utils/format';
+import { formatDate, formatDateWithWeekday, formatMinutes, formatMoney, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
+import { AttendanceStatusBadge } from '@/components/StatusBadge';
 
 export default function EmployeeDetailPage() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const { can } = useAuth();
   const [editOpen, setEditOpen] = React.useState(false);
+  const [attendanceMonth, setAttendanceMonth] = React.useState(dayjs().month() + 1);
+  const [attendanceYear, setAttendanceYear] = React.useState(dayjs().year());
+  const [attendanceStatus, setAttendanceStatus] = React.useState('');
+  const [attendancePage, setAttendancePage] = React.useState(1);
+
+  const monthStart = dayjs(`${attendanceYear}-${String(attendanceMonth).padStart(2, '0')}-01`);
 
   const query = useQuery({
-    queryKey: ['employee-summary', id],
-    queryFn: () => employeeApi.summary(id),
+    queryKey: ['employee-summary', id, attendanceYear, attendanceMonth],
+    queryFn: () => employeeApi.summary(id, { from: monthStart.format('YYYY-MM-DD'), to: monthStart.endOf('month').format('YYYY-MM-DD') }),
+    enabled: Boolean(id),
+  });
+  const attendanceQuery = useQuery({
+    queryKey: ['employee-attendance', id, attendanceYear, attendanceMonth, attendancePage, attendanceStatus],
+    queryFn: () => employeeApi.attendance(id, { year: attendanceYear, month: attendanceMonth, page: attendancePage, pageSize: 31, status: attendanceStatus || undefined }),
+    enabled: Boolean(id),
+  });
+  const payProfilesQuery = useQuery({
+    queryKey: ['employee-pay-profiles', id],
+    queryFn: () => employeeApi.payProfiles(id),
     enabled: Boolean(id),
   });
 
@@ -59,6 +79,12 @@ export default function EmployeeDetailPage() {
   }
 
   const { employee, attendance, payslips, payrollHistory } = query.data;
+  const currentPayProfile = payProfilesQuery.data?.find((profile) => {
+    const today = dayjs().startOf('day');
+    return profile.isActive && !today.isBefore(dayjs(profile.effectiveFrom), 'day') &&
+      (!profile.effectiveTo || !today.isAfter(dayjs(profile.effectiveTo), 'day'));
+  });
+  const paySource = currentPayProfile ? 'PAY_PROFILE' : Number(employee.baseSalary) > 0 ? 'LEGACY_BASE_SALARY' : 'UNCONFIGURED';
 
   return (
     <div>
@@ -121,16 +147,9 @@ export default function EmployeeDetailPage() {
                   label="ประเภทการจ้าง"
                   value={EMPLOYMENT_TYPE_LABELS[employee.employmentType]}
                 />
-                <InfoRow
-                  label={
-                    employee.employmentType === 'DAILY'
-                      ? 'ค่าจ้างต่อวัน'
-                      : employee.employmentType === 'HOURLY'
-                        ? 'ค่าจ้างต่อชั่วโมง'
-                        : 'เงินเดือน'
-                  }
-                  value={`${formatMoney(employee.baseSalary)} บาท`}
-                />
+                <InfoRow label="สถานะค่าจ้าง" value={paySource === 'PAY_PROFILE' ? 'พร้อมใช้งาน' : paySource === 'LEGACY_BASE_SALARY' ? 'ข้อมูลเดิม — รอกำหนดวันที่เริ่มใช้' : 'ยังไม่ได้กำหนด'} />
+                <InfoRow label={currentPayProfile?.payType === 'MONTHLY' || (!currentPayProfile && ['MONTHLY', 'CONTRACT'].includes(employee.employmentType)) ? 'เงินเดือนปัจจุบัน' : 'ค่าจ้างต่อชั่วโมงปัจจุบัน'} value={currentPayProfile ? `${formatMoney(currentPayProfile.payType === 'MONTHLY' ? currentPayProfile.monthlySalary : currentPayProfile.hourlyRate)} บาท${currentPayProfile.payType === 'MONTHLY' ? ' / เดือน' : ' / ชั่วโมง'}` : paySource === 'LEGACY_BASE_SALARY' ? `${formatMoney(employee.baseSalary)} บาท (ข้อมูลเดิม)` : '-'} />
+                <InfoRow label="เริ่มใช้วันที่" value={currentPayProfile ? formatDate(currentPayProfile.effectiveFrom) : '-'} />
                 <InfoRow label="ธนาคาร" value={employee.bankName ?? '-'} />
                 <InfoRow label="เลขที่บัญชี" value={employee.bankAccount ?? '-'} />
               </div>
@@ -140,14 +159,23 @@ export default function EmployeeDetailPage() {
                 <InfoRow label="หักประกันสังคม" value={employee.ssoEnabled ? 'ใช่' : 'ไม่'} />
                 <InfoRow label="หักภาษี" value={employee.taxEnabled ? 'ใช่' : 'ไม่'} />
                 <InfoRow label="มีสิทธิ์ OT" value={employee.otEligible ? 'ใช่' : 'ไม่'} />
+                <InfoRow label="ต้องลงเวลา" value={employee.attendanceRequired ? 'ใช่' : 'ยกเว้น'} />
+                <InfoRow label="ติดตามวันลา" value={employee.leaveTrackingRequired ? 'ใช่' : 'ยกเว้น'} />
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>ประวัติอัตราค่าจ้าง</CardTitle></CardHeader>
+            <CardContent>
+              {payProfilesQuery.data?.length ? <div className="overflow-x-auto"><table className="data-table"><thead><tr><th>รูปแบบ</th><th className="text-right">อัตรา</th><th>เริ่มใช้</th><th>สิ้นสุด</th><th>สถานะ</th></tr></thead><tbody>{payProfilesQuery.data.map((profile) => <tr key={profile.id}><td>{profile.payType === 'MONTHLY' ? 'รายเดือน' : 'คิดตามชั่วโมง'}</td><td className="num">{formatMoney(profile.payType === 'MONTHLY' ? profile.monthlySalary : profile.hourlyRate)}</td><td>{formatDate(profile.effectiveFrom)}</td><td>{profile.effectiveTo ? formatDate(profile.effectiveTo) : '-'}</td><td>{profile.isActive ? 'ใช้งาน' : 'ยกเลิก'}</td></tr>)}</tbody></table></div> : <EmptyState title="ยังไม่มีประวัติอัตราค่าจ้าง" description="กำหนดอัตราจริงได้จากหน้า ตั้งค่าเงินเดือน" />}
             </CardContent>
           </Card>
 
           {/* Attendance summary */}
           <Card>
             <CardHeader>
-              <CardTitle>สรุปการลงเวลา (ทั้งหมด)</CardTitle>
+              <div className="flex flex-wrap items-center justify-between gap-3"><CardTitle>สรุปการลงเวลา · {thaiMonthName(attendanceMonth)} {attendanceYear}</CardTitle><div className="flex gap-2"><Button variant="outline" size="sm" onClick={() => { const prev=monthStart.subtract(1,'month'); setAttendanceYear(prev.year()); setAttendanceMonth(prev.month()+1); setAttendancePage(1); }}>ก่อนหน้า</Button><Button variant="outline" size="sm" onClick={() => { const next=monthStart.add(1,'month'); setAttendanceYear(next.year()); setAttendanceMonth(next.month()+1); setAttendancePage(1); }}>ถัดไป</Button></div></div>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <MiniStat label="จำนวนวันที่บันทึก" value={formatNumber(attendance.totalRecords)} />
@@ -183,6 +211,7 @@ export default function EmployeeDetailPage() {
               <TabsTrigger value="salary">ประวัติเงินเดือน</TabsTrigger>
               <TabsTrigger value="payroll">ประวัติการคำนวณ</TabsTrigger>
               <TabsTrigger value="payslips">สลิปเงินเดือน</TabsTrigger>
+              <TabsTrigger value="attendance">ประวัติลงเวลา</TabsTrigger>
             </TabsList>
 
             <TabsContent value="salary">
@@ -259,6 +288,10 @@ export default function EmployeeDetailPage() {
 
             <TabsContent value="payslips">
               <PayslipHistory payslips={payslips} />
+            </TabsContent>
+            <TabsContent value="attendance">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3"><p className="text-sm font-medium">วันที่ทำงานจริง · {thaiMonthName(attendanceMonth)} {attendanceYear}</p><Select className="w-44" value={attendanceStatus} onChange={(e) => { setAttendanceStatus(e.target.value); setAttendancePage(1); }}><option value="">ทุกสถานะ</option><option value="NORMAL">มาทำงาน</option><option value="LATE">มาสาย</option><option value="LEAVE">ลา</option><option value="MISSING_DATA">ข้อมูลไม่ครบ</option><option value="ABSENT">ขาดงาน</option></Select></div>
+              {attendanceQuery.data?.items.length ? <><div className="overflow-x-auto"><table className="data-table"><thead><tr><th>วันที่</th><th>เข้า</th><th>ออก</th><th className="text-right">ชั่วโมงทำงาน</th><th className="text-right">สาย</th><th>สถานะ</th></tr></thead><tbody>{attendanceQuery.data.items.map((row) => <tr key={row.id}><td className="whitespace-nowrap">{formatDateWithWeekday(row.workDate)}</td><td>{formatTime(row.checkIn)}</td><td>{formatTime(row.checkOut)}</td><td className="num">{formatMinutes(row.workedMinutes)}</td><td className="num">{employee.employmentType === 'DAILY' || !row.lateMinutes ? '-' : `${row.lateMinutes} นาที`}</td><td><AttendanceStatusBadge status={row.status} /></td></tr>)}</tbody></table></div><Pagination page={attendanceQuery.data.page} pageSize={attendanceQuery.data.pageSize} total={attendanceQuery.data.total} onPageChange={setAttendancePage}/></> : <EmptyState title="ไม่พบประวัติการลงเวลาในเดือนนี้" />}
             </TabsContent>
           </Tabs>
         </CardContent>

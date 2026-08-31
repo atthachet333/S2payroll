@@ -253,14 +253,26 @@ export const Field = ({
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
 export const DialogClose = DialogPrimitive.Close;
+/** Exported so a dialog can supply its own title bar and stay accessible. */
+export const DialogTitle = DialogPrimitive.Title;
+export const DialogDescription = DialogPrimitive.Description;
 
 const overlayClass =
   'fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-[2px] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0';
 
 export const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & { title?: string; description?: string }
->(({ className, children, title, description, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+    title?: string;
+    description?: string;
+    /**
+     * Opt out of the built-in corner close button. Only for dialogs that render
+     * their own title bar and place the control there; every existing caller
+     * keeps the default.
+     */
+    hideDefaultClose?: boolean;
+  }
+>(({ className, children, title, description, hideDefaultClose, ...props }, ref) => (
   <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className={overlayClass} />
     <DialogPrimitive.Content
@@ -282,10 +294,12 @@ export const DialogContent = React.forwardRef<
         </div>
       )}
       {children}
-      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground opacity-70 transition hover:bg-accent hover:opacity-100 focus:outline-none">
-        <X className="h-4 w-4" />
-        <span className="sr-only">ปิด</span>
-      </DialogPrimitive.Close>
+      {!hideDefaultClose && (
+        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-md p-1 text-muted-foreground opacity-70 transition hover:bg-accent hover:opacity-100 focus:outline-none">
+          <X className="h-4 w-4" />
+          <span className="sr-only">ปิด</span>
+        </DialogPrimitive.Close>
+      )}
     </DialogPrimitive.Content>
   </DialogPrimitive.Portal>
 ));

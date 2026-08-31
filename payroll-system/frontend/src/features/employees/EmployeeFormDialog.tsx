@@ -1,4 +1,5 @@
 import * as React from 'react';
+import dayjs from 'dayjs';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { employeeApi, settingsApi } from '@/services/endpoints';
@@ -41,9 +42,13 @@ interface FormState {
   ssoEnabled: boolean;
   taxEnabled: boolean;
   otEligible: boolean;
+  attendanceRequired: boolean;
+  leaveTrackingRequired: boolean;
   status: string;
   note: string;
   salaryChangeReason: string;
+  payProfileAmount: string;
+  payEffectiveFrom: string;
 }
 
 const emptyForm = (): FormState => ({
@@ -67,9 +72,13 @@ const emptyForm = (): FormState => ({
   ssoEnabled: true,
   taxEnabled: true,
   otEligible: true,
+  attendanceRequired: true,
+  leaveTrackingRequired: true,
   status: 'ACTIVE',
   note: '',
   salaryChangeReason: '',
+  payProfileAmount: '',
+  payEffectiveFrom: '',
 });
 
 const fromEmployee = (e: Employee): FormState => ({
@@ -93,9 +102,13 @@ const fromEmployee = (e: Employee): FormState => ({
   ssoEnabled: e.ssoEnabled,
   taxEnabled: e.taxEnabled,
   otEligible: e.otEligible,
+  attendanceRequired: e.attendanceRequired,
+  leaveTrackingRequired: e.leaveTrackingRequired,
   status: e.status,
   note: e.note ?? '',
   salaryChangeReason: '',
+  payProfileAmount: '',
+  payEffectiveFrom: formatIsoDate(new Date()),
 });
 
 export default function EmployeeFormDialog({
@@ -130,6 +143,25 @@ export default function EmployeeFormDialog({
     queryFn: settingsApi.listPositions,
     enabled: open,
   });
+  const payProfilesQuery = useQuery({
+    queryKey: ['employee-pay-profiles', employee?.id],
+    queryFn: () => employeeApi.payProfiles(employee!.id),
+    enabled: open && Boolean(employee?.id),
+  });
+
+  React.useEffect(() => {
+    if (!open || !employee || !payProfilesQuery.data) return;
+    const active = payProfilesQuery.data.find((profile) => profile.isActive &&
+      !dayjs().startOf('day').isBefore(dayjs(profile.effectiveFrom), 'day') &&
+      (!profile.effectiveTo || !dayjs().startOf('day').isAfter(dayjs(profile.effectiveTo), 'day')));
+    setForm((current) => ({
+      ...current,
+      payProfileAmount: active
+        ? String(active.payType === 'MONTHLY' ? active.monthlySalary ?? '' : active.hourlyRate ?? '')
+        : Number(employee.baseSalary) > 0 ? employee.baseSalary : '',
+      payEffectiveFrom: active ? formatIsoDate(active.effectiveFrom) : '',
+    }));
+  }, [open, employee, payProfilesQuery.data]);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -158,6 +190,8 @@ export default function EmployeeFormDialog({
         ssoEnabled: form.ssoEnabled,
         taxEnabled: form.taxEnabled,
         otEligible: form.otEligible,
+        attendanceRequired: form.attendanceRequired,
+        leaveTrackingRequired: form.leaveTrackingRequired,
         status: form.status,
         note: form.note || null,
       };
@@ -166,14 +200,42 @@ export default function EmployeeFormDialog({
         if (salaryChanged && form.salaryChangeReason) {
           payload.salaryChangeReason = form.salaryChangeReason;
         }
-        return employeeApi.update(employee.id, payload);
+        const saved = await employeeApi.update(employee.id, payload);
+        const existingProfile = payProfilesQuery.data?.find((profile) => profile.isActive && formatIsoDate(profile.effectiveFrom) === form.payEffectiveFrom);
+        const existingAmount = existingProfile
+          ? String(existingProfile.payType === 'MONTHLY' ? existingProfile.monthlySalary ?? '' : existingProfile.hourlyRate ?? '')
+          : '';
+        if (form.payProfileAmount && form.payEffectiveFrom && (!existingProfile || Number(existingAmount) !== Number(form.payProfileAmount))) {
+          const monthly = ['MONTHLY', 'CONTRACT'].includes(form.employmentType);
+          await employeeApi.createPayProfile(saved.id, {
+            payType: monthly ? 'MONTHLY' : 'HOURLY',
+            monthlySalary: monthly ? form.payProfileAmount : null,
+            hourlyRate: monthly ? null : form.payProfileAmount,
+            effectiveFrom: form.payEffectiveFrom,
+            isActive: true,
+          });
+        }
+        return saved;
       }
-      return employeeApi.create({ ...payload, employeeCode: form.employeeCode });
+      const saved = await employeeApi.create({ ...payload, employeeCode: form.employeeCode });
+      if (form.payProfileAmount) {
+        const monthly = ['MONTHLY', 'CONTRACT'].includes(form.employmentType);
+        await employeeApi.createPayProfile(saved.id, {
+          payType: monthly ? 'MONTHLY' : 'HOURLY',
+          monthlySalary: monthly ? form.payProfileAmount : null,
+          hourlyRate: monthly ? null : form.payProfileAmount,
+          effectiveFrom: form.payEffectiveFrom,
+          isActive: true,
+        });
+      }
+      return saved;
     },
     onSuccess: () => {
       toast.success(isEdit ? 'บันทึกข้อมูลพนักงานแล้ว' : 'เพิ่มพนักงานใหม่เรียบร้อยแล้ว');
       void queryClient.invalidateQueries({ queryKey: ['employees'] });
       void queryClient.invalidateQueries({ queryKey: ['employee'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-pay-profiles'] });
+      void queryClient.invalidateQueries({ queryKey: ['pay-configurations'] });
       onOpenChange(false);
     },
     onError: (err) => setError(apiErrorMessage(err)),
@@ -209,7 +271,7 @@ export default function EmployeeFormDialog({
                   value={form.employeeCode}
                   onChange={(e) => set('employeeCode', e.target.value)}
                   disabled={isEdit}
-                  placeholder="EMP001"
+                  placeholder="S2A001"
                   required
                 />
               </Field>
@@ -312,38 +374,29 @@ export default function EmployeeFormDialog({
             </TabsContent>
 
             <TabsContent value="payroll" className="grid gap-4 sm:grid-cols-2">
+              <div className="rounded-lg border border-primary/20 bg-primary/5 px-3.5 py-3 sm:col-span-2">
+                <p className="text-sm font-medium">การตั้งค่าการจ่ายเงินแบบมีวันที่เริ่มใช้</p>
+                <p className="mt-1 text-xs text-muted-foreground">กรอกเฉพาะเมื่อต้องการเพิ่มอัตราใหม่ ประวัติเดิมจะไม่ถูกเขียนทับ</p>
+              </div>
               <Field
                 label={
-                  form.employmentType === 'DAILY'
-                    ? 'ค่าจ้างต่อวัน (บาท)'
-                    : form.employmentType === 'HOURLY'
-                      ? 'ค่าจ้างต่อชั่วโมง (บาท)'
-                      : 'เงินเดือน (บาท)'
+                  ['DAILY', 'HOURLY'].includes(form.employmentType)
+                    ? 'อัตราค่าจ้าง (บาท/ชั่วโมง)'
+                    : 'เงินเดือน (บาท/เดือน)'
                 }
-                required
               >
                 <Input
                   type="number"
                   step="0.01"
                   min="0"
-                  value={form.baseSalary}
-                  onChange={(e) => set('baseSalary', e.target.value)}
-                  required
+                  value={form.payProfileAmount}
+                  onChange={(e) => set('payProfileAmount', e.target.value)}
+                  placeholder="เว้นว่างหากยังไม่กำหนดอัตราจริง"
                 />
               </Field>
-
-              {salaryChanged && (
-                <Field
-                  label="เหตุผลในการปรับเงินเดือน"
-                  hint="บันทึกลงในประวัติการปรับเงินเดือน"
-                >
-                  <Input
-                    value={form.salaryChangeReason}
-                    onChange={(e) => set('salaryChangeReason', e.target.value)}
-                    placeholder="เช่น ปรับประจำปี"
-                  />
-                </Field>
-              )}
+              <Field label="วันที่เริ่มใช้">
+                <Input type="date" value={form.payEffectiveFrom} onChange={(e) => set('payEffectiveFrom', e.target.value)} required={Boolean(form.payProfileAmount)} />
+              </Field>
 
               <Field label="ธนาคาร">
                 <Input value={form.bankName} onChange={(e) => set('bankName', e.target.value)} />
@@ -379,6 +432,16 @@ export default function EmployeeFormDialog({
                   label="มีสิทธิ์รับค่าล่วงเวลา (OT)"
                   checked={form.otEligible}
                   onChange={(v) => set('otEligible', v)}
+                />
+                <ToggleRow
+                  label="ต้องลงเวลาเข้า-ออกงาน"
+                  checked={form.attendanceRequired}
+                  onChange={(v) => set('attendanceRequired', v)}
+                />
+                <ToggleRow
+                  label="ต้องติดตามและตรวจสอบวันลา"
+                  checked={form.leaveTrackingRequired}
+                  onChange={(v) => set('leaveTrackingRequired', v)}
                 />
               </div>
             </TabsContent>

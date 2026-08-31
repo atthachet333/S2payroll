@@ -22,21 +22,49 @@ export interface SettingDefinition {
  */
 export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
   // --- Working time ---
+  // The company policy is a fixed 08:30-17:30 day for monthly staff. These two
+  // keys are the authority; the legacy WORK_START_TIME / WORK_END_TIME pair is
+  // kept only as a fallback for installations that have not been migrated.
   {
-    key: 'WORK_START_TIME',
-    value: '09:00',
+    key: 'MONTHLY_WORK_START_TIME',
+    value: '08:30',
     valueType: SettingValueType.TIME,
     group: 'ATTENDANCE',
-    label: 'เวลาเริ่มงาน',
-    description: 'Official shift start time used to compute late minutes.',
+    label: 'เวลาเริ่มงานพนักงานรายเดือน',
+    description: 'เข้างานหลังเวลานี้ถือว่ามาสาย นับนาทีสายจากเวลานี้',
+  },
+  {
+    key: 'MONTHLY_WORK_END_TIME',
+    value: '17:30',
+    valueType: SettingValueType.TIME,
+    group: 'ATTENDANCE',
+    label: 'เวลาเลิกงานพนักงานรายเดือน',
+    description: 'เวลาเลิกงานคงที่ ไม่เลื่อนตามเวลาที่เข้างาน',
+  },
+  {
+    key: 'MONTHLY_FLEX_ARRIVAL_MINUTES',
+    value: '0',
+    valueType: SettingValueType.NUMBER,
+    group: 'ATTENDANCE',
+    label: 'ช่วงเข้างานยืดหยุ่น (นาที) — ยกเลิกแล้ว',
+    description:
+      'นโยบายปัจจุบันไม่มีช่วงเข้างานยืดหยุ่น ค่านี้ต้องเป็น 0 เก็บไว้เพื่อความเข้ากันได้ย้อนหลังเท่านั้น',
+  },
+  {
+    key: 'WORK_START_TIME',
+    value: '08:30',
+    valueType: SettingValueType.TIME,
+    group: 'ATTENDANCE',
+    label: 'เวลาเริ่มงาน (ค่าสำรอง)',
+    description: 'ใช้เมื่อยังไม่ได้ตั้งค่า MONTHLY_WORK_START_TIME',
   },
   {
     key: 'WORK_END_TIME',
-    value: '18:00',
+    value: '17:30',
     valueType: SettingValueType.TIME,
     group: 'ATTENDANCE',
-    label: 'เวลาเลิกงาน',
-    description: 'Official shift end time. Work beyond this becomes OT.',
+    label: 'เวลาเลิกงาน (ค่าสำรอง)',
+    description: 'ใช้เมื่อยังไม่ได้ตั้งค่า MONTHLY_WORK_END_TIME',
   },
   {
     key: 'BREAK_MINUTES',
@@ -48,11 +76,72 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
   },
   {
     key: 'LATE_GRACE_MINUTES',
-    value: '15',
+    value: '0',
     valueType: SettingValueType.NUMBER,
     group: 'ATTENDANCE',
     label: 'ผ่อนผันการมาสาย (นาที)',
-    description: 'Minutes after shift start that are not counted as late.',
+    description:
+      'นโยบายปัจจุบันไม่ผ่อนผัน เข้างานหลังเวลาเริ่มงานแม้ 1 นาทีถือว่าสาย ค่านี้ต้องเป็น 0',
+  },
+  {
+    key: 'DAILY_DEDUCT_BREAK',
+    value: 'false',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'ATTENDANCE',
+    label: 'หักเวลาพักจากพนักงานรายวัน',
+    description: 'ปิดไว้เพื่อคิดเวลารายวันตามเวลาเข้า-ออกจริงโดยไม่หักพักอัตโนมัติ',
+  },
+  {
+    key: 'DAILY_OT_ENABLED',
+    value: 'false',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'OT',
+    label: 'คำนวณ OT พนักงานรายวัน',
+    description: 'ปิดไว้จนกว่าบริษัทจะกำหนดกฎ OT สำหรับพนักงานรายวันอย่างชัดเจน',
+  },
+  {
+    key: 'MONTHLY_OT_ENABLED',
+    value: 'false',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'OT',
+    label: 'คำนวณ OT พนักงานรายเดือน',
+    description: 'ปิดไว้จนกว่าบริษัทจะกำหนดหรืออนุมัติกฎ OT รายเดือนอย่างชัดเจน',
+  },
+  {
+    key: 'OT_REQUIRES_APPROVAL',
+    value: 'true',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'OT',
+    label: 'OT ต้องได้รับอนุมัติก่อนจ่าย — ยังไม่เปิดใช้งาน',
+    description:
+      'เวลาที่อยู่เกินเวลาเลิกงานเป็นเพียงเวลาที่สังเกตได้ ต้องอนุมัติก่อนจึงจะกลายเป็น OT ที่จ่ายเงิน',
+  },
+  // Deliberately blank. The company has not stated its monetary OT multiplier,
+  // and guessing one would put an invented number on a payslip. The pre-payroll
+  // check raises MISSING_OT_RATE while approved OT exists and this is unset.
+  {
+    key: 'MONTHLY_OT_MULTIPLIER',
+    value: '',
+    valueType: SettingValueType.DECIMAL,
+    group: 'OT',
+    label: 'ตัวคูณ OT พนักงานรายเดือน',
+    description: 'ยังไม่กำหนด ต้องตั้งค่าก่อนจึงจะคำนวณเงิน OT ของพนักงานรายเดือนได้',
+  },
+  {
+    key: 'DAILY_OT_MULTIPLIER',
+    value: '',
+    valueType: SettingValueType.DECIMAL,
+    group: 'OT',
+    label: 'ตัวคูณ OT พนักงานรายวัน',
+    description: 'ยังไม่กำหนด ต้องตั้งค่าก่อนจึงจะคำนวณเงิน OT ของพนักงานรายวันได้',
+  },
+  {
+    key: 'HOURLY_OT_MULTIPLIER',
+    value: '',
+    valueType: SettingValueType.DECIMAL,
+    group: 'OT',
+    label: 'ตัวคูณ OT พนักงานรายชั่วโมง',
+    description: 'ยังไม่กำหนด ต้องตั้งค่าก่อนจึงจะคำนวณเงิน OT ของพนักงานรายชั่วโมงได้',
   },
   {
     key: 'STANDARD_WORK_HOURS',
@@ -89,7 +178,17 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
     value: 'false',
     valueType: SettingValueType.BOOLEAN,
     group: 'ATTENDANCE',
-    label: 'นับวันเสาร์-อาทิตย์เป็นวันทำงาน',
+    label: 'นับวันเสาร์-อาทิตย์เป็นวันทำงาน — ยกเลิกแล้ว',
+    description:
+      'ไม่มีผลกับการคำนวณอีกต่อไป ใช้ "วันทำงาน" (WORKING_DAYS) เป็นตัวกำหนดเพียงอย่างเดียว เก็บไว้เพื่อความเข้ากันได้ย้อนหลัง',
+  },
+  {
+    key: 'WORKING_DAYS',
+    value: 'MON,TUE,WED,THU,FRI,SAT',
+    valueType: SettingValueType.STRING,
+    group: 'ATTENDANCE',
+    label: 'วันทำงานประจำสัปดาห์',
+    description: 'วันทำงานที่ใช้ร่วมกันในปฏิทิน การลงเวลา และรอบเงินเดือน',
   },
 
   // --- OT ---
@@ -161,6 +260,34 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
     valueType: SettingValueType.DECIMAL,
     group: 'DEDUCTION',
     label: 'จำนวนเงินหักขาดงานแบบคงที่ (บาท/วัน)',
+  },
+  // The company converts a monthly salary to a day and an hour with fixed
+  // divisors, never with the calendar length of the month or the number of
+  // scheduled working days - those would make the same absence cost a
+  // different amount in February than in March.
+  {
+    key: 'MONTHLY_SALARY_DAY_DIVISOR',
+    value: '30',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'ตัวหารเงินเดือนเป็นรายวัน (วัน)',
+    description: 'เงินเดือน ÷ ค่านี้ = ค่าจ้างต่อวัน ใช้กับการหักขาดงานและหักมาสาย',
+  },
+  {
+    key: 'STANDARD_PAID_HOURS_PER_DAY',
+    value: '8',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'ชั่วโมงทำงานมาตรฐานต่อวัน (ชั่วโมง)',
+    description: 'ค่าจ้างต่อวัน ÷ ค่านี้ = ค่าจ้างต่อชั่วโมง ใช้คำนวณการหักมาสาย',
+  },
+  {
+    key: 'LATE_DEDUCTION_ROUND_UP_HOURS',
+    value: 'true',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'DEDUCTION',
+    label: 'ปัดการหักมาสายขึ้นเป็นช่วงละ 1 ชั่วโมง',
+    description: 'สายกี่นาทีก็ตามในชั่วโมงแรกหัก 1 ชั่วโมง (ceil(นาทีสาย ÷ 60))',
   },
 
   // --- Social security ---
@@ -288,6 +415,14 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
     label: 'ห้ามอนุมัติเมื่อยังมีข้อมูลไม่ครบ',
   },
   {
+    key: 'ATTENDANCE_CLOSE_GRACE_MINUTES',
+    value: '0',
+    valueType: SettingValueType.NUMBER,
+    group: 'ATTENDANCE',
+    label: 'เวลาผ่อนผันหลังเลิกงานก่อนถือว่าข้อมูลไม่ครบ (นาที)',
+    description: 'ใช้เฉพาะการจำแนก check-out ที่ยังไม่มาในวันปัจจุบัน ค่าเริ่มต้น 0 นาที',
+  },
+  {
     key: 'PAYSLIP_PREFIX',
     value: 'PS',
     valueType: SettingValueType.STRING,
@@ -297,12 +432,29 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
 
   // --- Google Sheets ---
   {
+    key: 'GOOGLE_SYNC_ENABLED',
+    value: 'true',
+    valueType: SettingValueType.BOOLEAN,
+    group: 'GOOGLE_SHEETS',
+    label: 'อัปเดตข้อมูล Google Sheets อัตโนมัติ',
+    description: 'ดึงข้อมูลเข้า-ออกงาน พนักงาน และการลา เป็นรอบโดยอัตโนมัติ (อ่านอย่างเดียว)',
+  },
+  {
+    key: 'GOOGLE_SYNC_INTERVAL_SECONDS',
+    value: '60',
+    valueType: SettingValueType.NUMBER,
+    group: 'GOOGLE_SHEETS',
+    label: 'รอบการอัปเดต (วินาที)',
+    description: 'ขั้นต่ำ 30 วินาที ค่าที่ต่ำกว่านี้จะถูกปรับขึ้นเป็น 30 อัตโนมัติ · ค่าเริ่มต้น 60',
+  },
+  {
     key: 'SHEET_AUTO_CREATE_EMPLOYEE',
     value: 'false',
     valueType: SettingValueType.BOOLEAN,
     group: 'GOOGLE_SHEETS',
-    label: 'สร้างพนักงานอัตโนมัติเมื่อพบรหัสใหม่',
-    description: 'When false, unknown employee codes are reported as sync errors.',
+    label: 'สร้างพนักงานอัตโนมัติเมื่อพบรหัสใหม่ — ยังไม่เปิดใช้งาน',
+    description:
+      'ยังไม่มีผลกับการซิงก์ ขณะนี้รหัสพนักงานที่ไม่รู้จักจะถูกรายงานเป็นข้อผิดพลาดเสมอ ไม่มีการสร้างพนักงานอัตโนมัติ',
   },
   {
     key: 'SHEET_OVERWRITE_CORRECTED',

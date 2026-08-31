@@ -14,6 +14,7 @@ const ATTENDANCE: Record<AttendanceStatus, { label: string; tone: Tone }> = {
   OT: { label: 'ทำ OT', tone: 'info' },
   ABSENT: { label: 'ขาดงาน', tone: 'danger' },
   MISSING_DATA: { label: 'ข้อมูลไม่ครบ', tone: 'danger' },
+  IN_PROGRESS: { label: 'กำลังทำงาน', tone: 'info' },
   LEAVE: { label: 'ลา', tone: 'secondary' },
   HOLIDAY: { label: 'วันหยุด', tone: 'outline' },
 };

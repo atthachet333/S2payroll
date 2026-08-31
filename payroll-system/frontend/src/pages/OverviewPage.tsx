@@ -14,7 +14,7 @@ import {
   YAxis,
 } from 'recharts';
 import { AlertTriangle, CheckCircle2, Clock, Users, Wallet } from 'lucide-react';
-import { overviewApi } from '@/services/endpoints';
+import { overviewApi, POLL_INTERVAL_MS } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
 import {
   Card,
@@ -38,6 +38,8 @@ export default function OverviewPage() {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['overview'],
     queryFn: () => overviewApi.get(),
+    refetchInterval: POLL_INTERVAL_MS.overview,
+    placeholderData: (previous) => previous,
   });
 
   if (isLoading) {
@@ -88,6 +90,21 @@ export default function OverviewPage() {
         }
         actions={period ? <PeriodStatusBadge status={period.status} /> : null}
       />
+
+      {/* With no payroll period the money figures below are genuinely zero, not
+          missing. Say so plainly rather than letting a wall of ฿0.00 read as a
+          calculation result. */}
+      {!period && (
+        <Card className="border-dashed bg-muted/30 p-4">
+          <p className="text-sm font-medium text-foreground">
+            ยังไม่มีข้อมูลเงินเดือนสำหรับรอบนี้
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            กรุณาสร้างรอบเงินเดือนและคำนวณ เพื่อแสดงยอดรวมและแนวโน้ม
+            ตัวเลขด้านล่างคำนวณจากข้อมูลจริงในระบบเท่านั้น
+          </p>
+        </Card>
+      )}
 
       {/* Headline counters */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">

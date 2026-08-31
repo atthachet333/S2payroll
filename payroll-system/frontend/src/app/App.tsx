@@ -5,6 +5,7 @@ import { Loader2 } from 'lucide-react';
 import { AuthProvider, useAuth } from '@/features/auth/AuthContext';
 import AppLayout from '@/layouts/AppLayout';
 import LoginPage from '@/pages/LoginPage';
+import ChangePasswordPage from '@/pages/ChangePasswordPage';
 import OverviewPage from '@/pages/OverviewPage';
 import EmployeesPage from '@/pages/EmployeesPage';
 import EmployeeDetailPage from '@/pages/EmployeeDetailPage';
@@ -14,6 +15,7 @@ import PayrollDetailPage from '@/pages/PayrollDetailPage';
 import PayslipsPage from '@/pages/PayslipsPage';
 import ReportsPage from '@/pages/ReportsPage';
 import SettingsPage from '@/pages/SettingsPage';
+import PayrollSettingsPage from '@/pages/PayrollSettingsPage';
 import NotFoundPage from '@/pages/NotFoundPage';
 
 const queryClient = new QueryClient({
@@ -55,6 +57,10 @@ function ProtectedRoute({
 
   if (loading) return <FullPageLoader />;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
+  // The API refuses every protected route for such an account with
+  // PASSWORD_CHANGE_REQUIRED, so send the user to the form instead of letting
+  // them walk into a wall of 403s.
+  if (user.mustChangePassword) return <Navigate to="/change-password" replace />;
   if (permission && !can(permission)) return <Navigate to="/" replace />;
 
   return <>{children}</>;
@@ -64,6 +70,8 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Sits outside ProtectedRoute so a flagged account can actually reach it. */}
+      <Route path="/change-password" element={<ChangePasswordPage />} />
       <Route
         element={
           <ProtectedRoute>
@@ -125,6 +133,14 @@ function AppRoutes() {
           element={
             <ProtectedRoute permission="report:read">
               <ReportsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="payroll-settings"
+          element={
+            <ProtectedRoute permission="settings:read">
+              <PayrollSettingsPage />
             </ProtectedRoute>
           }
         />

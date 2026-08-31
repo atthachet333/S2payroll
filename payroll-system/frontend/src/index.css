@@ -94,6 +94,16 @@
     @apply bg-accent/40;
   }
 
+  /* Attendance has many short time fields and one flexible identity field.
+   * Keep its density and sizing local so other data tables remain unchanged. */
+  .attendance-table thead th {
+    @apply px-2.5 py-2 whitespace-nowrap align-middle;
+  }
+
+  .attendance-table tbody td {
+    @apply px-2.5 py-2 align-middle;
+  }
+
   .num {
     @apply text-right tabular-nums;
   }

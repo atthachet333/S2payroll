@@ -352,6 +352,13 @@ Prepared for live company usage. Go-live steps: [PRODUCTION_CHECKLIST.md](PRODUC
 
 ---
 
+## Payroll UX and effective-dated configuration — 31 Aug 2026
+
+- Effective-dated employee pay profiles are implemented (`MONTHLY` salary or minute-precise `HOURLY` rate). Existing employees were intentionally not backfilled with invented rates.
+- Payroll Calculate now performs readiness checking in the background: ready periods calculate immediately; blocking findings open the existing readiness dialog.
+- System settings and payroll settings now have separate Thai navigation and pages.
+- Effective-dated work schedule profiles and typed public/company holidays are available without rewriting historical attendance automatically.
+
 ## Optional improvements
 
 Not required by the specification; listed for future planning.
@@ -381,3 +388,11 @@ Not required by the specification; listed for future planning.
 - Employee self-service portal for viewing personal payslips
 - End-to-end tests against a disposable MariaDB container
 - Structured log shipping and metrics dashboards
+# August payroll readiness and current-day safety (2026-08-31)
+
+- Current-day open punches are exposed as `IN_PROGRESS` until the effective work-end plus `ATTENDANCE_CLOSE_GRACE_MINUTES` (default `0`) in `Asia/Bangkok`.
+- Past incomplete punches remain blocking. An open payroll period permits calculation preview but backend guards prevent approval, payment, and locking.
+- `NO_ATTENDANCE` now considers employment-period overlap, required attendance, approved leave, configured workdays, and holidays.
+- Pay readiness uses one specific blocker per root cause (`MISSING_MONTHLY_SALARY`, `MISSING_HOURLY_RATE`) and validates effective-date coverage without backfilling later rates.
+- Payroll Settings now includes an employee pay-configuration table and explicit effective-dated forms. No compensation values are generated automatically.
+- Payroll detail shows readiness counters and direct remediation links; employee detail shows current pay readiness and profile history separately from master-data completeness.

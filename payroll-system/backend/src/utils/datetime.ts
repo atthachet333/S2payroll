@@ -86,6 +86,20 @@ export const toUtcDateOnly = (date: Date | string): Date =>
 export const formatDateOnly = (date: Date | string): string =>
   dayjs.utc(date).format('YYYY-MM-DD');
 
+/** Company-local clock without depending on the server's operating-system timezone. */
+export function companyClock(now = new Date(), timeZone = 'Asia/Bangkok') {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? '0';
+  const date = `${value('year')}-${value('month')}-${value('day')}`;
+  const minutes = Number(value('hour')) * 60 + Number(value('minute'));
+  return { date, minutes, timeZone };
+}
+
 export const isWeekend = (date: Date): boolean => {
   const day = dayjs.utc(date).day();
   return day === 0 || day === 6;

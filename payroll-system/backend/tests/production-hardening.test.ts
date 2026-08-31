@@ -53,6 +53,8 @@ describe('seed never resets an existing password', () => {
 
 describe('forced password change is enforced server-side', () => {
   const authSource = fs.readFileSync(path.join(backendRoot, 'src', 'plugins', 'auth.ts'), 'utf8');
+  const forceScript = fs.readFileSync(path.join(backendRoot, 'scripts', 'force-password-change.ts'), 'utf8');
+  const authService = fs.readFileSync(path.join(backendRoot, 'src', 'services', 'auth.service.ts'), 'utf8');
 
   it('blocks ordinary routes while mustChangePassword is set', () => {
     expect(authSource).toContain('mustChangePassword');
@@ -66,11 +68,58 @@ describe('forced password change is enforced server-side', () => {
   });
 
   it('clears the flag when the password is replaced', () => {
-    const authService = fs.readFileSync(
-      path.join(backendRoot, 'src', 'services', 'auth.service.ts'),
-      'utf8'
-    );
     expect(authService).toContain('mustChangePassword: false');
+  });
+
+  it('the force command cannot read or alter the password hash', () => {
+    // Documentation deliberately names the forbidden field; assert executable
+    // Prisma data/select shapes rather than banning the word from comments.
+    expect(forceScript).not.toMatch(/select\s*:\s*\{[\s\S]{0,500}passwordHash\s*:/);
+    expect(forceScript).not.toMatch(/data\s*:\s*\{[\s\S]{0,500}passwordHash\s*:/);
+    expect(forceScript).not.toContain('hashPassword');
+    expect(forceScript).not.toContain('SEED_ADMIN_PASSWORD');
+    expect(forceScript).toContain('data: { mustChangePassword: target }');
+  });
+
+  it('login verifies the existing hash without rejecting the force flag', () => {
+    const loginBody = authService.slice(authService.indexOf('export async function login'), authService.indexOf('export async function refresh'));
+    expect(loginBody).toContain('verifyPassword(user.passwordHash, password)');
+    expect(loginBody).not.toContain('mustChangePassword) throw');
+    expect(loginBody).toContain('issueTokens(app, user, meta)');
+  });
+});
+
+describe('frontend forced-password and stale-session flow', () => {
+  const frontendRoot = path.join(backendRoot, '..', 'frontend', 'src');
+  const loginPage = fs.readFileSync(path.join(frontendRoot, 'pages', 'LoginPage.tsx'), 'utf8');
+  const authContext = fs.readFileSync(path.join(frontendRoot, 'features', 'auth', 'AuthContext.tsx'), 'utf8');
+  const apiSource = fs.readFileSync(path.join(frontendRoot, 'services', 'api.ts'), 'utf8');
+
+  it('routes a successful forced login directly to change-password', () => {
+    expect(loginPage).toContain("sessionUser.mustChangePassword ? '/change-password' : '/'");
+  });
+
+  it('clears stale tokens before a fresh login when no session is active', () => {
+    expect(authContext).toContain('if (!user) tokenStore.clear()');
+    expect(authContext).toContain('tokenStore.set(result.accessToken, result.refreshToken)');
+  });
+
+  it('handles PASSWORD_CHANGE_REQUIRED separately from invalid credentials', () => {
+    expect(apiSource).toContain("responseData?.error?.code === 'PASSWORD_CHANGE_REQUIRED'");
+    expect(apiSource).toContain('onPasswordChangeRequired?.()');
+    expect(apiSource).toContain("error.response?.status !== 401");
+  });
+
+  it('does not render the login form until session restoration finishes', () => {
+    expect(loginPage).toContain('if (loading)');
+    expect(loginPage).toContain('กำลังตรวจสอบเซสชัน');
+  });
+
+  it('prevents a stale refresh failure from clearing a newer login session', () => {
+    expect(apiSource).toContain('_authGeneration');
+    expect(apiSource).toContain('original?._authGeneration === tokenStore.generation');
+    expect(apiSource).toContain('tokenGeneration += 1');
+    expect(authContext).toContain('if (tokenStore.access === accessAtStart) tokenStore.clear()');
   });
 });
 

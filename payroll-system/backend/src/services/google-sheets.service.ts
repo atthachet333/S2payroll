@@ -5,10 +5,10 @@ import { prisma } from '../plugins/prisma.js';
 import { attendanceRange, env, googlePrivateKey, isGoogleSheetsConfigured } from '../config/env.js';
 import { loadSettings } from './settings.service.js';
 import { computeAttendanceMetrics } from './attendance.service.js';
+import { isScheduledWorkday } from './schedule-policy.service.js';
 import { recordAudit } from './audit.service.js';
 import {
   dayjs,
-  isWeekend as isWeekendDate,
   parseSheetDate,
   parseSheetTime,
 } from '../utils/datetime.js';
@@ -80,6 +80,7 @@ export type SyncRowAction =
   | 'MISSING_CHECKIN'
   | 'MISSING_CHECKOUT'
   | 'MULTIPLE_EVENTS'
+  | 'SUPPRESSED'
   | 'DUPLICATE_SOURCE_EVENT'
   | 'WORK_HOURS_MISMATCH';
 
@@ -285,10 +286,17 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
   let imported = 0;
   let updated = 0;
   let skipped = 0;
+  let suppressedCount = 0;
   let duplicates = 0;
   let protectedCount = 0;
   let invalid = 0;
   let unknownEmployee = 0;
+  let missingCheckIn = 0;
+  let missingCheckOut = 0;
+  let multipleEvents = 0;
+  let duplicateSourceEvents = 0;
+  let workHoursMismatch = 0;
+  let sourceEventCount = 0;
   let rows: SheetRow[] = [];
 
   // Preview rows are only collected on a dry run, and capped so a very large
@@ -300,12 +308,19 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
   };
 
   try {
-    rows = options.rows ?? (await fetchSheetRows(sheetId, range));
+    if (options.rows) {
+      rows = options.rows;
+      sourceEventCount = rows.reduce((total, row) => total + (row.sourceEvents?.length ?? 1), 0);
+    } else {
+      const fetched = await fetchSheet(sheetId, range);
+      rows = fetched.rows;
+      sourceEventCount = fetched.sourceEventCount;
+    }
 
     const codes = [...new Set(rows.map((r) => r.employeeCode).filter(Boolean))];
     const employees = await prisma.employee.findMany({
       where: { employeeCode: { in: codes } },
-      select: { id: true, employeeCode: true, otEligible: true, firstName: true, lastName: true },
+      select: { id: true, employeeCode: true, otEligible: true, employmentType: true, firstName: true, lastName: true },
     });
     const byCode = new Map(
       employees.map((e) => [e.employeeCode, { ...e, name: `${e.firstName} ${e.lastName}` }])
@@ -315,6 +330,16 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
     const holidaySet = new Set(holidays.map((h) => dayjs.utc(h.date).format('YYYY-MM-DD')));
 
     const leaves = await prisma.leaveRecord.findMany({ where: { status: 'APPROVED' } });
+
+    // Days an operator deliberately deleted. The sheet is read-only and still
+    // holds the source events, so without this the next sync would simply put
+    // the deleted day back.
+    const suppressions = await prisma.attendanceSuppression.findMany({
+      select: { employeeId: true, workDate: true },
+    });
+    const suppressed = new Set(
+      suppressions.map((s) => `${s.employeeId}|${dayjs.utc(s.workDate).format('YYYY-MM-DD')}`)
+    );
 
     // Rows repeated inside a single sheet pull are duplicates of each other.
     const seenInThisPull = new Set<string>();
@@ -383,6 +408,39 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
         continue;
       }
 
+      const previewBase = {
+        row: row.sheetRow,
+        employeeCode: row.employeeCode,
+        employeeName: employee.name,
+        date: dayjs.utc(workDate).format('YYYY-MM-DD'),
+        checkIn: row.checkIn,
+        checkOut: row.checkOut,
+        sheetRows: row.sheetRows,
+        sourceEventCount: row.sourceEvents?.length,
+        checkInEvents: row.checkInEvents,
+        checkOutEvents: row.checkOutEvents,
+        sourceEvents: row.sourceEvents,
+      };
+
+      if (row.eventStatus === 'INVALID' || row.eventStatus === 'MULTIPLE_EVENTS') {
+        const action = row.eventStatus === 'MULTIPLE_EVENTS' ? 'MULTIPLE_EVENTS' : 'INVALID';
+        if (action === 'MULTIPLE_EVENTS') multipleEvents += 1;
+        else invalid += 1;
+        errors.push({
+          row: row.sheetRow,
+          employeeCode: row.employeeCode,
+          date: row.date,
+          message: row.eventReason ?? action,
+        });
+        addPreview({ ...previewBase, action, reason: row.eventReason });
+        continue;
+      }
+
+      if (row.eventStatus === 'MISSING_CHECKIN') missingCheckIn += 1;
+      if (row.eventStatus === 'MISSING_CHECKOUT') missingCheckOut += 1;
+      duplicateSourceEvents += row.duplicateSourceEvents ?? 0;
+      if (row.workHoursWarning) workHoursMismatch += 1;
+
       // A time cell that is present but unparseable is a data error, not a
       // missing punch - importing it as blank would hide the problem.
       const badTime = [
@@ -412,6 +470,27 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
       }
 
       const dayKey = `${employee.id}|${dayjs.utc(workDate).format('YYYY-MM-DD')}`;
+
+      // An operator deleted this day on purpose. Re-importing it would undo a
+      // deliberate decision every time the scheduler ticks, so the day is
+      // skipped until the suppression is explicitly lifted. The raw source
+      // events are still archived below-the-line by earlier syncs and remain
+      // available for audit.
+      if (suppressed.has(dayKey)) {
+        suppressedCount += 1;
+        addPreview({
+          row: row.sheetRow,
+          employeeCode: row.employeeCode,
+          employeeName: employee.name,
+          date: dayjs.utc(workDate).format('YYYY-MM-DD'),
+          action: 'SUPPRESSED',
+          checkIn: row.checkIn,
+          checkOut: row.checkOut,
+          reason: 'ผู้ดูแลลบข้อมูลวันนี้ออกจากระบบแล้ว จะไม่นำเข้าซ้ำจนกว่าจะกู้คืน',
+        });
+        continue;
+      }
+
       if (seenInThisPull.has(dayKey)) {
         duplicates += 1;
         addPreview({
@@ -430,20 +509,28 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
 
       const hash = rowHash(row);
 
-      // Archive the source row verbatim before doing anything else.
+      // Archive every source event verbatim. A stable event hash makes the raw
+      // archive idempotent while retaining all events that formed one workday.
       if (!options.dryRun) {
-        await prisma.attendanceRawData.create({
-          data: {
-            syncId: sync?.id ?? null,
-            employeeCode: row.employeeCode,
-            rawDate: row.date,
-            rawCheckIn: row.checkIn,
-            rawCheckOut: row.checkOut,
-            rowHash: hash,
-            sheetRow: row.sheetRow,
-            payload: row as unknown as object,
-          },
-        });
+        const rawEvents = row.sourceEvents?.length ? row.sourceEvents : [null];
+        for (const event of rawEvents) {
+          const eventHash = event ? sourceEventHash(event) : hash;
+          const archived = await prisma.attendanceRawData.findFirst({ where: { rowHash: eventHash } });
+          if (!archived) {
+            await prisma.attendanceRawData.create({
+              data: {
+                syncId: sync?.id ?? null,
+                employeeCode: row.employeeCode,
+                rawDate: event?.date ?? row.date,
+                rawCheckIn: event?.type.toLowerCase() === 'checkin' ? event.time : row.checkIn,
+                rawCheckOut: event?.type.toLowerCase() === 'checkout' ? event.time : row.checkOut,
+                rowHash: eventHash,
+                sheetRow: event?.sheetRow ?? row.sheetRow,
+                payload: (event ?? row) as unknown as object,
+              },
+            });
+          }
+        }
       }
 
       const existing = await prisma.attendanceRecord.findUnique({
@@ -509,7 +596,7 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
 
       const dateKey = dayjs.utc(workDate).format('YYYY-MM-DD');
       const isHoliday = holidaySet.has(dateKey);
-      const weekend = isWeekendDate(workDate);
+      const weekend = !isScheduledWorkday(workDate, settings);
       const isOnLeave = leaves.some(
         (l) => l.employeeId === employee.id && l.startDate <= workDate && l.endDate >= workDate
       );
@@ -523,6 +610,7 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
           isWeekend: weekend,
           isOnLeave,
           otEligible: employee.otEligible,
+          employmentType: employee.employmentType,
         },
         settings
       );
@@ -540,6 +628,15 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
           checkOut: row.checkOut,
           previousCheckIn: existing?.checkIn ? dayjs.utc(existing.checkIn).format('HH:mm') : null,
           previousCheckOut: existing?.checkOut ? dayjs.utc(existing.checkOut).format('HH:mm') : null,
+          sheetRows: row.sheetRows,
+          sourceEventCount: row.sourceEvents?.length,
+          checkInEvents: row.checkInEvents,
+          checkOutEvents: row.checkOutEvents,
+          sourceEvents: row.sourceEvents,
+          reason:
+            row.eventStatus === 'MISSING_CHECKIN' || row.eventStatus === 'MISSING_CHECKOUT'
+              ? row.eventReason
+              : row.workHoursWarning ?? undefined,
         });
         continue;
       }
@@ -634,6 +731,8 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
       durationMs,
       invalid,
       unknownEmployee,
+      sourceEvents: sourceEventCount,
+      groupedEmployeeDays: rows.length,
       counts: {
         NEW: imported,
         UPDATE: updated,
@@ -642,6 +741,12 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
         LOCKED: skipped,
         INVALID: invalid,
         UNKNOWN_EMPLOYEE: unknownEmployee,
+        MISSING_CHECKIN: missingCheckIn,
+        MISSING_CHECKOUT: missingCheckOut,
+        MULTIPLE_EVENTS: multipleEvents,
+        SUPPRESSED: suppressedCount,
+        DUPLICATE_SOURCE_EVENT: duplicateSourceEvents,
+        WORK_HOURS_MISMATCH: workHoursMismatch,
       },
       dryRun: Boolean(options.dryRun),
       ...(options.dryRun ? { preview } : {}),

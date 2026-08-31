@@ -51,14 +51,15 @@ const attendance = (overrides: Partial<AttendanceAggregate> = {}): AttendanceAgg
 });
 
 describe('rate derivation', () => {
-  it('derives a daily rate from a monthly salary and the standard work days', () => {
-    // 30000 / 22 = 1363.6363... -> 1363.64
-    expect(dailyRate(employee(), settings()).toFixed(2)).toBe('1363.64');
+  it('derives a daily rate from a monthly salary and the fixed salary divisor', () => {
+    // Company policy divides by a fixed 30 days, never by the working-day count.
+    // 30000 / 30 = 1000.00
+    expect(dailyRate(employee(), settings()).toFixed(2)).toBe('1000.00');
   });
 
-  it('derives an hourly rate from the daily rate and standard hours', () => {
-    // 1363.64 / 8 = 170.455 -> 170.46
-    expect(hourlyRate(employee(), settings()).toFixed(2)).toBe('170.46');
+  it('derives an hourly rate from the daily rate and the standard paid day', () => {
+    // 1000 / 8 = 125.00
+    expect(hourlyRate(employee(), settings()).toFixed(2)).toBe('125.00');
   });
 
   it('treats a DAILY employee base salary as the daily rate itself', () => {
@@ -73,8 +74,38 @@ describe('rate derivation', () => {
     expect(dailyRate(e, settings()).toFixed(2)).toBe('960.00');
   });
 
-  it('does not divide by zero when STANDARD_WORK_DAYS is misconfigured to 0', () => {
-    expect(dailyRate(employee(), settings({ STANDARD_WORK_DAYS: '0' })).toFixed(2)).toBe('0.00');
+  it('pays a DAILY hourly profile from exact worked minutes with Decimal arithmetic', () => {
+    const result = calculatePayroll({
+      employee: employee({
+        employmentType: EmploymentType.DAILY,
+        baseSalary: '0',
+        payType: 'HOURLY',
+        hourlyRate: '63',
+        ssoEnabled: false,
+        taxEnabled: false,
+      }),
+      attendance: attendance({ workedMinutes: 455, normalMinutes: 455, presentDays: 1 }),
+    }, settings({ SSO_ENABLED: 'false', TAX_ENABLED: 'false' }));
+    expect(result.baseSalary.toFixed(2)).toBe('477.75');
+    expect(result.hourlyRate.toFixed(2)).toBe('63.00');
+  });
+
+  it('keeps DAILY worked minutes but fabricates no money when no rate is configured', () => {
+    const result = calculatePayroll({
+      employee: employee({ employmentType: EmploymentType.DAILY, baseSalary: '0', payType: undefined, hourlyRate: null, ssoEnabled: false, taxEnabled: false }),
+      attendance: attendance({ workedMinutes: 315, normalMinutes: 315, presentDays: 1 }),
+    }, settings({ SSO_ENABLED: 'false', TAX_ENABLED: 'false' }));
+    expect(result.workingHours.toFixed(2)).toBe('5.25');
+    expect(result.baseSalary.toFixed(2)).toBe('0.00');
+    expect(result.grossIncome.toFixed(2)).toBe('0.00');
+    expect(result.reviewNotes).toContain('ยังไม่ได้กำหนดค่าจ้างพนักงานรายวัน — ยังไม่รวมค่าจ้างในยอดเงิน');
+    expect(result.status).toBe('NEEDS_REVIEW');
+  });
+
+  it('does not divide by zero when the salary divisor is misconfigured to 0', () => {
+    expect(
+      dailyRate(employee(), settings({ MONTHLY_SALARY_DAY_DIVISOR: '0', STANDARD_WORK_DAYS: '0' })).toFixed(2)
+    ).toBe('0.00');
   });
 });
 
@@ -179,9 +210,9 @@ describe('calculatePayroll', () => {
       { employee: employee(), attendance: attendance({ otWeekdayMinutes: 600 }) },
       settings()
     );
-    // 10 hours * (170.46 * 1.5 = 255.69) = 2556.90
+    // 10 hours * (125.00 * 1.5 = 187.50) = 1875.00
     expect(result.otHours.toFixed(2)).toBe('10.00');
-    expect(result.otAmount.toFixed(2)).toBe('2556.90');
+    expect(result.otAmount.toFixed(2)).toBe('1875.00');
   });
 
   it('pays weekend and holiday OT at their own multipliers', () => {
@@ -192,8 +223,8 @@ describe('calculatePayroll', () => {
       },
       settings()
     );
-    // weekend 170.46*2 = 340.92, holiday 170.46*3 = 511.38 -> 852.30
-    expect(result.otAmount.toFixed(2)).toBe('852.30');
+    // weekend 125*2 = 250.00, holiday 125*3 = 375.00 -> 625.00
+    expect(result.otAmount.toFixed(2)).toBe('625.00');
   });
 
   it('pays no OT to an employee who is not OT eligible', () => {
@@ -207,13 +238,14 @@ describe('calculatePayroll', () => {
     expect(result.otAmount.toFixed(2)).toBe('0.00');
   });
 
-  it('deducts late minutes at the pro-rated hourly rate', () => {
+  it('charges lateness in whole-hour blocks at the hourly rate', () => {
     const result = calculatePayroll(
       { employee: employee(), attendance: attendance({ lateCount: 2, lateMinutes: 60 }) },
       settings()
     );
-    // 170.46 / 60 * 60 = 170.46
-    expect(result.lateDeduction.toFixed(2)).toBe('170.46');
+    // 60 late minutes = ceil(60/60) = 1 chargeable hour at 125.00
+    expect(result.lateDeductionHours).toBe(1);
+    expect(result.lateDeduction.toFixed(2)).toBe('125.00');
   });
 
   it('deducts late occurrences at a flat rate when configured that way', () => {
@@ -229,7 +261,8 @@ describe('calculatePayroll', () => {
       { employee: employee(), attendance: attendance({ absentDays: 2, presentDays: 20 }) },
       settings()
     );
-    expect(result.absenceDeduction.toFixed(2)).toBe('2727.28');
+    // 2 days at the fixed 30-day rate: 30000/30 * 2 = 2000.00
+    expect(result.absenceDeduction.toFixed(2)).toBe('2000.00');
     expect(result.status).toBe('NEEDS_REVIEW');
   });
 
@@ -238,7 +271,7 @@ describe('calculatePayroll', () => {
       { employee: employee(), attendance: attendance({ unpaidLeaveDays: 1 }) },
       settings()
     );
-    expect(result.absenceDeduction.toFixed(2)).toBe('1363.64');
+    expect(result.absenceDeduction.toFixed(2)).toBe('1000.00');
   });
 
   it('does not deduct anything for paid leave', () => {
@@ -335,6 +368,24 @@ describe('calculatePayroll', () => {
       settings()
     );
     expect(result.status).toBe('MISSING_DATA');
+  });
+
+  it('allows an attendance-exempt monthly executive without attendance', () => {
+    const result = calculatePayroll(
+      {
+        employee: employee({ attendanceRequired: false }),
+        attendance: attendance({
+          presentDays: 0,
+          workedMinutes: 0,
+          normalMinutes: 0,
+          missingDataDays: 0,
+        }),
+      },
+      settings()
+    );
+    expect(result.baseSalary.toFixed(2)).toBe('30000.00');
+    expect(result.status).toBe('READY');
+    expect(result.reviewNotes).not.toContain('ไม่พบข้อมูลการลงเวลาในรอบนี้');
   });
 
   it('flags a negative net salary for review', () => {

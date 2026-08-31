@@ -11,6 +11,7 @@ import {
   LogOut,
   Menu,
   Settings as SettingsIcon,
+  SlidersHorizontal,
   Users,
   Wallet,
   X,
@@ -40,7 +41,8 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/payroll', label: 'เงินเดือน', icon: <Wallet className="h-4 w-4" />, permission: 'payroll:read' },
   { to: '/payslips', label: 'สลิปเงินเดือน', icon: <Banknote className="h-4 w-4" />, permission: 'payslip:read' },
   { to: '/reports', label: 'รายงาน', icon: <FileText className="h-4 w-4" />, permission: 'report:read' },
-  { to: '/settings', label: 'ตั้งค่า', icon: <SettingsIcon className="h-4 w-4" />, permission: 'settings:read' },
+  { to: '/payroll-settings', label: 'ตั้งค่าเงินเดือน', icon: <SlidersHorizontal className="h-4 w-4" />, permission: 'settings:read' },
+  { to: '/settings', label: 'ตั้งค่าระบบ', icon: <SettingsIcon className="h-4 w-4" />, permission: 'settings:read' },
 ];
 
 const ROLE_LABELS: Record<string, string> = {
@@ -157,15 +159,18 @@ export default function AppLayout() {
             className="flex items-center gap-2.5"
             onClick={() => navigate('/')}
           >
-            <span className="grid h-9 w-9 place-items-center rounded-lg bg-primary text-primary-foreground">
-              <Wallet className="h-5 w-5" />
-            </span>
+            <img
+              src="/images/s2a-payroll-mark.png"
+              alt=""
+              aria-hidden
+              className="h-9 w-9 rounded-lg object-contain"
+            />
             <span className="hidden text-left sm:block">
-              <span className="block text-sm font-semibold leading-tight text-foreground">
-                ระบบบริหารเงินเดือน
+              <span className="block text-sm font-semibold leading-tight tracking-tight text-foreground">
+                S2A-PAYROLL
               </span>
               <span className="block text-xs leading-tight text-muted-foreground">
-                Payroll Management
+                ระบบบริหารเงินเดือน
               </span>
             </span>
           </button>

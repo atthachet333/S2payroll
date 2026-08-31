@@ -29,6 +29,11 @@ const PREVIEW_ACTION: Record<string, { label: string; tone: Tone }> = {
   LOCKED: { label: 'ข้าม (รอบถูกล็อก)', tone: 'outline' },
   INVALID: { label: 'ข้อมูลไม่ถูกต้อง', tone: 'danger' },
   UNKNOWN_EMPLOYEE: { label: 'ไม่พบพนักงาน', tone: 'danger' },
+  MISSING_CHECKIN: { label: 'ไม่มีเวลาเข้า', tone: 'warning' },
+  MISSING_CHECKOUT: { label: 'ไม่มีเวลาออก', tone: 'warning' },
+  MULTIPLE_EVENTS: { label: 'หลายเหตุการณ์', tone: 'danger' },
+  DUPLICATE_SOURCE_EVENT: { label: 'เหตุการณ์ต้นทางซ้ำ', tone: 'warning' },
+  WORK_HOURS_MISMATCH: { label: 'ชั่วโมงไม่ตรง', tone: 'warning' },
 };
 
 const SYNC_STATUS: Record<string, { label: string; tone: 'success' | 'warning' | 'danger' | 'info' }> = {
@@ -196,7 +201,7 @@ export default function SyncPanel({ canSync }: { canSync: boolean }) {
             {lastResult.preview && lastResult.preview.length > 0 && (
               <div className="overflow-hidden rounded-lg border border-border">
                 <div className="bg-secondary/60 px-3.5 py-2 text-sm font-medium">
-                  ตัวอย่างรายการที่จะนำเข้า ({lastResult.preview.length} แถวแรก)
+                  ตัวอย่างรายการ ({lastResult.preview.length} วันพนักงาน, {lastResult.sourceEvents} เหตุการณ์ต้นทาง)
                 </div>
                 <div className="max-h-72 overflow-y-auto">
                   <table className="data-table">
@@ -223,8 +228,8 @@ export default function SyncPanel({ canSync }: { canSync: boolean }) {
                           <td className="tabular-nums">{r.checkIn ?? '—'}</td>
                           <td className="tabular-nums">{r.checkOut ?? '—'}</td>
                           <td>
-                            <Badge variant={PREVIEW_ACTION[r.action].tone}>
-                              {PREVIEW_ACTION[r.action].label}
+                            <Badge variant={(PREVIEW_ACTION[r.action] ?? PREVIEW_ACTION.INVALID).tone}>
+                              {(PREVIEW_ACTION[r.action] ?? PREVIEW_ACTION.INVALID).label}
                             </Badge>
                             {r.reason && (
                               <div className="mt-0.5 text-xs text-muted-foreground">{r.reason}</div>
@@ -367,4 +372,3 @@ function ResultTile({
     </div>
   );
 }
-

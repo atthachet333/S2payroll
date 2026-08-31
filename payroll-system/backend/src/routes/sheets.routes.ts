@@ -2,8 +2,53 @@ import type { FastifyInstance } from 'fastify';
 import { paginationSchema, syncSchema } from '../schemas/index.js';
 import * as sheetsService from '../services/google-sheets.service.js';
 import { getActor } from '../middleware/actor.js';
+import { importLeaves, previewLeaveSync } from '../services/leave-sync.service.js';
+import { autoSync } from '../services/auto-sync.service.js';
 
 export default async function sheetsRoutes(app: FastifyInstance): Promise<void> {
+  // Operational status only - no credentials, no connection strings, and any
+  // error text is scrubbed before it is stored.
+  app.get(
+    '/auto-sync/status',
+    { preHandler: [app.requirePermission('attendance:read')] },
+    async (_request, reply) => reply.send(await autoSync.getLiveStatus())
+  );
+
+  // Runs Employees -> Attendance -> Leave through the same mutex the scheduler
+  // uses, so a manual trigger can never overlap a background cycle.
+  app.post(
+    '/sync-all',
+    {
+      preHandler: [app.requirePermission('attendance:sync')],
+      config: { rateLimit: { max: 6, timeWindow: '1 minute' } },
+    },
+    async (_request, reply) => {
+      const result = await autoSync.runCycle('manual');
+      if (!result) {
+        return reply.status(409).send({
+          code: 'SYNC_ALREADY_RUNNING',
+          message: 'กำลังซิงก์ข้อมูลอยู่ กรุณารอสักครู่แล้วลองใหม่',
+        });
+      }
+      return reply.send(result);
+    }
+  );
+
+  app.get(
+    '/leaves/preview',
+    { preHandler: [app.requirePermission('attendance:sync')] },
+    async (_request, reply) => reply.send(await previewLeaveSync())
+  );
+
+  app.post(
+    '/leaves/sync',
+    { preHandler: [app.requirePermission('attendance:sync')] },
+    async (request, reply) => {
+      const actor = getActor(request);
+      return reply.send(await importLeaves({ actorId: actor.userId }));
+    }
+  );
+
   app.post(
     '/sync',
     {

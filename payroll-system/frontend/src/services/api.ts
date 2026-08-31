@@ -8,8 +8,12 @@ const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:2234';
 
 const ACCESS_TOKEN_KEY = 'payroll.accessToken';
 const REFRESH_TOKEN_KEY = 'payroll.refreshToken';
+let tokenGeneration = 0;
 
 export const tokenStore = {
+  get generation(): number {
+    return tokenGeneration;
+  },
   get access(): string | null {
     return localStorage.getItem(ACCESS_TOKEN_KEY);
   },
@@ -19,10 +23,12 @@ export const tokenStore = {
   set(accessToken: string, refreshToken: string) {
     localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
     localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    tokenGeneration += 1;
   },
   clear() {
     localStorage.removeItem(ACCESS_TOKEN_KEY);
     localStorage.removeItem(REFRESH_TOKEN_KEY);
+    tokenGeneration += 1;
   },
 };
 
@@ -33,6 +39,7 @@ export const api: AxiosInstance = axios.create({
 });
 
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  (config as InternalAxiosRequestConfig & { _authGeneration?: number })._authGeneration = tokenStore.generation;
   const token = tokenStore.access;
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
@@ -59,6 +66,11 @@ export const setSessionExpiredHandler = (handler: () => void) => {
   onSessionExpired = handler;
 };
 
+let onPasswordChangeRequired: (() => void) | null = null;
+export const setPasswordChangeRequiredHandler = (handler: () => void) => {
+  onPasswordChangeRequired = handler;
+};
+
 // Single-flight refresh: concurrent 401s wait on one refresh call rather than
 // each firing their own and invalidating the rotating refresh token.
 let refreshPromise: Promise<string> | null = null;
@@ -79,7 +91,16 @@ async function refreshAccessToken(): Promise<string> {
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
-    const original = error.config as InternalAxiosRequestConfig & { _retried?: boolean };
+    const original = error.config as InternalAxiosRequestConfig & {
+      _retried?: boolean;
+      _authGeneration?: number;
+    };
+    const responseData = error.response?.data as { error?: { code?: string } } | undefined;
+
+    if (error.response?.status === 403 && responseData?.error?.code === 'PASSWORD_CHANGE_REQUIRED') {
+      onPasswordChangeRequired?.();
+      return Promise.reject(error);
+    }
 
     const isAuthCall = original?.url?.includes('/api/auth/');
     if (error.response?.status !== 401 || original?._retried || isAuthCall) {
@@ -96,8 +117,12 @@ api.interceptors.response.use(
       return api(original);
     } catch (refreshError) {
       refreshPromise = null;
-      tokenStore.clear();
-      onSessionExpired?.();
+      // A stale restore request may finish after a fresh credential login.
+      // Never let that old failure clear the newer session.
+      if (original?._authGeneration === tokenStore.generation) {
+        tokenStore.clear();
+        onSessionExpired?.();
+      }
       return Promise.reject(refreshError);
     }
   }

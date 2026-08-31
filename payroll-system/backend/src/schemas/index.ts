@@ -62,6 +62,8 @@ export const createEmployeeSchema = z.object({
   ssoEnabled: z.boolean().optional(),
   taxEnabled: z.boolean().optional(),
   otEligible: z.boolean().optional(),
+  attendanceRequired: z.boolean().optional(),
+  leaveTrackingRequired: z.boolean().optional(),
   status: employeeStatusSchema.optional(),
   note: z.string().max(500).nullish(),
 });
@@ -79,6 +81,8 @@ export const employeeQuerySchema = paginationSchema.extend({
   departmentId: z.string().uuid().optional(),
   status: employeeStatusSchema.optional(),
   employmentType: employmentTypeSchema.optional(),
+  /** Master-data completeness, not payroll readiness for a period. */
+  completeness: z.enum(['COMPLETE', 'INCOMPLETE']).optional(),
 });
 
 export const deactivateSchema = z.object({
@@ -103,6 +107,8 @@ export const attendanceQuerySchema = paginationSchema.extend({
   from: dateString.optional(),
   to: dateString.optional(),
   status: attendanceStatusSchema.optional(),
+  employmentType: employmentTypeSchema.optional(),
+  includeExempt: z.coerce.boolean().optional().default(false),
   search: z.string().optional(),
 });
 
@@ -126,6 +132,7 @@ export const correctAttendanceSchema = z
 export const recalculateSchema = z.object({
   from: dateString,
   to: dateString,
+  employeeId: z.string().uuid().optional(),
 });
 
 // --- sheets sync -------------------------------------------------------------
@@ -304,5 +311,41 @@ export const leaveSchema = z.object({
 export const holidaySchema = z.object({
   date: dateString,
   name: z.string().min(1).max(191),
+  type: z.enum(['PUBLIC_HOLIDAY', 'COMPANY_HOLIDAY']).default('COMPANY_HOLIDAY'),
+  note: z.string().max(500).nullish(),
   isPaid: z.boolean().default(true),
+});
+
+export const payProfileSchema = z.object({
+  payType: z.enum(['MONTHLY', 'HOURLY']),
+  monthlySalary: decimalString.nullish(),
+  hourlyRate: decimalString.nullish(),
+  effectiveFrom: dateString,
+  effectiveTo: dateString.nullish(),
+  isActive: z.boolean().default(true),
+}).superRefine((value, context) => {
+  const required = value.payType === 'MONTHLY' ? value.monthlySalary : value.hourlyRate;
+  if (required === null || required === undefined || Number(required) <= 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [value.payType === 'MONTHLY' ? 'monthlySalary' : 'hourlyRate'],
+      message: value.payType === 'MONTHLY' ? 'กรุณาระบุเงินเดือนที่มากกว่า 0' : 'กรุณาระบุอัตราค่าจ้างต่อชั่วโมงที่มากกว่า 0',
+    });
+  }
+});
+
+export const workScheduleProfileSchema = z.object({
+  name: z.string().trim().min(1).max(191),
+  effectiveFrom: dateString,
+  effectiveTo: dateString.nullish(),
+  workingDays: z.array(z.enum(['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'])).min(1),
+  workStartTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  workEndTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  flexArrivalMinutes: z.number().int().min(0).max(240),
+  isActive: z.boolean().default(true),
+});
+
+/** A deletion must carry a real reason - it removes a day from payroll. */
+export const deleteAttendanceSchema = z.object({
+  reason: z.string().trim().min(3, 'กรุณาระบุเหตุผลในการลบ').max(500),
 });

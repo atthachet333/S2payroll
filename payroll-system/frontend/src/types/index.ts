@@ -9,6 +9,7 @@ export type AttendanceStatus =
   | 'OT'
   | 'ABSENT'
   | 'MISSING_DATA'
+  | 'IN_PROGRESS'
   | 'LEAVE'
   | 'HOLIDAY';
 
@@ -31,6 +32,13 @@ export interface SessionUser {
   role: RoleCode;
   permissions: string[];
   employeeId: string | null;
+  /**
+   * Set while the account still carries a bootstrap or admin-reset password.
+   * The API already enforces this - every route except /auth/me,
+   * /auth/change-password and /auth/logout answers PASSWORD_CHANGE_REQUIRED -
+   * so the UI mirrors it by routing the user straight to the change form.
+   */
+  mustChangePassword: boolean;
 }
 
 export interface AuthResponse {
@@ -63,6 +71,18 @@ export interface Position {
   department?: Department | null;
 }
 
+export interface EmployeeProfileCompleteness {
+  complete: boolean;
+  /** Stable field keys, for filtering and tests. */
+  missingFields: string[];
+  /** Thai labels, ready to render. */
+  missingLabels: string[];
+  missingCount: number;
+  /** Excused from attendance, leave and therefore compensation. */
+  exempt: boolean;
+  compensationRequired: boolean;
+}
+
 export interface Employee {
   id: string;
   employeeCode: string;
@@ -85,11 +105,18 @@ export interface Employee {
   ssoEnabled: boolean;
   taxEnabled: boolean;
   otEligible: boolean;
+  attendanceRequired: boolean;
+  leaveTrackingRequired: boolean;
   status: EmployeeStatus;
   note: string | null;
   department?: Department | null;
   position?: Position | null;
   salaryHistory?: SalaryHistory[];
+  /** Master-data completeness, decided by the backend - never recomputed here. */
+  profileCompleteness?: EmployeeProfileCompleteness;
+  lineUserId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface SalaryHistory {
@@ -124,6 +151,8 @@ export interface AttendanceRecord {
   status: AttendanceStatus;
   source: string;
   isCorrected: boolean;
+  /** True only when a human pinned the status, not merely edited the punches. */
+  statusOverride?: boolean;
   isLocked: boolean;
   note: string | null;
   employee?: {
@@ -132,6 +161,9 @@ export interface AttendanceRecord {
     firstName: string;
     lastName: string;
     nickname: string | null;
+    employmentType?: EmploymentType;
+    attendanceRequired?: boolean;
+    leaveTrackingRequired?: boolean;
     department?: { id: string; name: string } | null;
   };
   adjustments?: AttendanceAdjustment[];
@@ -144,6 +176,8 @@ export interface AttendanceAdjustment {
   newValue: string | null;
   reason: string;
   changedBy: string;
+  /** Resolved display name for changedBy; null when the user no longer exists. */
+  changedByName?: string | null;
   changedAt: string;
 }
 
@@ -344,9 +378,18 @@ export interface PrePayrollReport {
   startDate: string;
   endDate: string;
   canCalculate: boolean;
+  isPreview: boolean;
+  periodClosed: boolean;
   blocking: number;
   warning: number;
   info: number;
+  readiness: {
+    employees: number;
+    ready: number;
+    missingPay: number;
+    incompleteAttendance: number;
+    inProgressToday: number;
+  };
   findings: CheckFinding[];
 }
 
@@ -407,7 +450,12 @@ export type SyncRowAction =
   | 'PROTECTED'
   | 'LOCKED'
   | 'INVALID'
-  | 'UNKNOWN_EMPLOYEE';
+  | 'UNKNOWN_EMPLOYEE'
+  | 'MISSING_CHECKIN'
+  | 'MISSING_CHECKOUT'
+  | 'MULTIPLE_EVENTS'
+  | 'DUPLICATE_SOURCE_EVENT'
+  | 'WORK_HOURS_MISMATCH';
 
 export interface SyncPreviewRow {
   row: number;
@@ -420,6 +468,10 @@ export interface SyncPreviewRow {
   checkOut: string | null;
   previousCheckIn?: string | null;
   previousCheckOut?: string | null;
+  sheetRows?: number[];
+  sourceEventCount?: number;
+  checkInEvents?: string[];
+  checkOutEvents?: string[];
 }
 
 export interface SyncResult {
@@ -437,6 +489,8 @@ export interface SyncResult {
   dryRun: boolean;
   invalid: number;
   unknownEmployee: number;
+  sourceEvents: number;
+  groupedEmployeeDays: number;
   counts: Record<SyncRowAction, number>;
 }
 
@@ -526,7 +580,44 @@ export interface Holiday {
   id: string;
   date: string;
   name: string;
+  type: 'PUBLIC_HOLIDAY' | 'COMPANY_HOLIDAY';
+  note: string | null;
   isPaid: boolean;
+}
+
+export interface EmployeePayProfile {
+  id: string;
+  employeeId: string;
+  payType: 'MONTHLY' | 'HOURLY';
+  monthlySalary: string | null;
+  hourlyRate: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  isActive: boolean;
+}
+
+export interface EmployeePayConfiguration {
+  id: string;
+  employeeCode: string;
+  firstName: string;
+  lastName: string;
+  employmentType: EmploymentType;
+  exempt: boolean;
+  profile: EmployeePayProfile | null;
+  paySource: 'PAY_PROFILE' | 'LEGACY_BASE_SALARY' | 'UNCONFIGURED';
+  legacyBaseSalary: string;
+}
+
+export interface WorkScheduleProfile {
+  id: string;
+  name: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  workingDays: string;
+  workStartTime: string;
+  workEndTime: string;
+  flexArrivalMinutes: number;
+  isActive: boolean;
 }
 
 export interface LeaveRecord {

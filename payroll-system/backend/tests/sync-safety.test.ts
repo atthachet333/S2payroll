@@ -8,6 +8,7 @@ const backendRoot = path.join(here, '..');
 const read = (...p: string[]) => fs.readFileSync(path.join(backendRoot, ...p), 'utf8');
 
 const sheetsSource = read('src', 'services', 'google-sheets.service.ts');
+const leaveSheetsSource = read('src', 'services', 'leave-sync.service.ts');
 
 /**
  * The attendance sheet belongs to the customer, not to this system. These tests
@@ -20,6 +21,14 @@ describe('Google Sheets is read-only', () => {
     // The read/write scope must never appear.
     expect(sheetsSource).not.toMatch(/auth\/spreadsheets'/);
     expect(sheetsSource).not.toContain('https://www.googleapis.com/auth/drive');
+  });
+
+  it('keeps LeaveRequests access read-only too', () => {
+    expect(leaveSheetsSource).toContain('spreadsheets.readonly');
+    expect(leaveSheetsSource).toContain('spreadsheets.values.get');
+    for (const writeCall of ['values.update', 'values.append', 'values.clear', 'values.batchUpdate', 'spreadsheets.batchUpdate']) {
+      expect(leaveSheetsSource).not.toContain(writeCall);
+    }
   });
 
   it('never calls a Sheets write API', () => {

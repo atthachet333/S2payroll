@@ -2,13 +2,13 @@ import * as React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { authApi } from '@/services/endpoints';
-import { apiErrorMessage, setSessionExpiredHandler, tokenStore } from '@/services/api';
+import { apiErrorMessage, setPasswordChangeRequiredHandler, setSessionExpiredHandler, tokenStore } from '@/services/api';
 import type { SessionUser } from '@/types';
 
 interface AuthContextValue {
   user: SessionUser | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<SessionUser>;
   logout: () => Promise<void>;
   /** True when the signed-in role carries the given "resource:action" permission. */
   can: (permission: string) => boolean;
@@ -26,7 +26,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     const restore = async () => {
-      if (!tokenStore.access) {
+      const accessAtStart = tokenStore.access;
+      if (!accessAtStart) {
         setLoading(false);
         return;
       }
@@ -34,7 +35,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const me = await authApi.me();
         if (!cancelled) setUser(me);
       } catch {
-        tokenStore.clear();
+        // If a fresh login completed while this old restore was in flight,
+        // preserve the newer tokens. Its request generation is authoritative.
+        if (tokenStore.access === accessAtStart) tokenStore.clear();
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -55,13 +58,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, [navigate]);
 
+  React.useEffect(() => {
+    setPasswordChangeRequiredHandler(() => {
+      navigate('/change-password', { replace: true });
+    });
+  }, [navigate]);
+
   const login = React.useCallback(
     async (email: string, password: string) => {
+      // A revoked token left by the force-change action must not be allowed to
+      // interfere with a fresh credential login. Only clear it when there is
+      // no valid in-memory session to preserve.
+      if (!user) tokenStore.clear();
       const result = await authApi.login(email, password);
       tokenStore.set(result.accessToken, result.refreshToken);
       setUser(result.user);
+      return result.user;
     },
-    []
+    [user]
   );
 
   const logout = React.useCallback(async () => {

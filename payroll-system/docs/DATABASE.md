@@ -298,6 +298,28 @@ logging failure must not lose a payroll approval.
 
 ## Migrations
 
+### Live database migration-history note (31 Aug 2026)
+
+The current live `s2apayroll` schema predates Prisma's migration ledger, so `prisma migrate deploy`
+correctly returns `P3005` instead of replaying the initial migration over a populated database.
+Do not baseline or replay historical migrations without a separate schema audit.
+
+The additive payroll-configuration schema is applied idempotently with:
+
+```bash
+npm run db:apply-payroll-config-schema
+```
+
+That command runs the database guard, verifies `SELECT DATABASE() = s2apayroll`, creates only
+`employee_pay_profiles` and `work_schedule_profiles`, and adds `type`/`note` to `holidays`.
+It never inserts rates, schedules, or holiday dates.
+
+### Effective-dated configuration
+
+- `employee_pay_profiles`: monthly salary or hourly rate with effective start/end dates and history.
+- `work_schedule_profiles`: working days, start/end time and flex minutes with effective dates.
+- `holidays.type`: `PUBLIC_HOLIDAY` or `COMPANY_HOLIDAY`; existing rows default safely to company holiday.
+
 ```bash
 npm run prisma:migrate     # development: create + apply
 npm run prisma:deploy      # production: apply committed migrations

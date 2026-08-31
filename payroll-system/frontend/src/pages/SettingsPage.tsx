@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Plus, Save, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Save, Trash2 } from 'lucide-react';
 import { employeeApi, payrollApi, settingsApi } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
 import { useAuth } from '@/features/auth/AuthContext';
@@ -49,13 +49,14 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <PageHeader title="ตั้งค่า" description="ข้อมูลบริษัท กฎการคำนวณ ผู้ใช้งาน และบันทึกการตรวจสอบ" />
+      <PageHeader title="ตั้งค่าระบบ" description="ข้อมูลบริษัท เวลาและวันทำงาน วันหยุด ผู้ใช้งาน และการเชื่อมต่อระบบ" />
 
       <Tabs defaultValue="company">
         <TabsList className="flex-wrap">
           <TabsTrigger value="company">บริษัท</TabsTrigger>
           <TabsTrigger value="org">แผนก / ตำแหน่ง</TabsTrigger>
-          <TabsTrigger value="rules">กฎการคำนวณ</TabsTrigger>
+          <TabsTrigger value="rules">เวลาและวันทำงาน</TabsTrigger>
+          <TabsTrigger value="schedules">ตารางเวลาที่เริ่มใช้ตามวันที่</TabsTrigger>
           <TabsTrigger value="holidays">วันหยุด</TabsTrigger>
           {can('user:read') && <TabsTrigger value="users">ผู้ใช้งาน / สิทธิ์</TabsTrigger>}
           {can('audit:read') && <TabsTrigger value="audit">บันทึกการตรวจสอบ</TabsTrigger>}
@@ -68,8 +69,9 @@ export default function SettingsPage() {
           <OrgSettings canWrite={canWrite} />
         </TabsContent>
         <TabsContent value="rules">
-          <RuleSettings canWrite={canWrite} />
+          <RuleSettings canWrite={canWrite} groups={['ATTENDANCE', 'GOOGLE_SHEETS']} />
         </TabsContent>
+        <TabsContent value="schedules"><WorkScheduleSettings canWrite={canWrite} /></TabsContent>
         <TabsContent value="holidays">
           <HolidaySettings canWrite={canWrite} />
         </TabsContent>
@@ -86,6 +88,36 @@ export default function SettingsPage() {
       </Tabs>
     </div>
   );
+}
+
+function WorkScheduleSettings({ canWrite }: { canWrite: boolean }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = React.useState(false);
+  const [form, setForm] = React.useState({
+    name: 'เวลาทำงานปกติ', effectiveFrom: '', effectiveTo: '',
+    workingDays: ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'],
+    workStartTime: '08:00', workEndTime: '17:00', flexArrivalMinutes: 30,
+  });
+  const query = useQuery({ queryKey: ['work-schedules'], queryFn: settingsApi.listWorkSchedules });
+  const mutation = useMutation({
+    mutationFn: () => settingsApi.createWorkSchedule({ ...form, effectiveTo: form.effectiveTo || null }),
+    onSuccess: () => { toast.success('เพิ่มตารางเวลาทำงานแล้ว'); setOpen(false); void queryClient.invalidateQueries({ queryKey: ['work-schedules'] }); },
+    onError: (error) => toast.error(apiErrorMessage(error)),
+  });
+  const dayOptions = [['MON','จ'],['TUE','อ'],['WED','พ'],['THU','พฤ'],['FRI','ศ'],['SAT','ส'],['SUN','อา']];
+  return <Card>
+    <CardHeader className="flex-row items-center justify-between"><div><CardTitle>ตารางเวลาทำงาน</CardTitle><CardDescription>กำหนดวันที่เริ่มใช้เพื่อรักษากฎของข้อมูลย้อนหลัง ระบบจะไม่แก้ประวัติเดิมอัตโนมัติ</CardDescription></div>{canWrite && <Button size="sm" onClick={() => setOpen(true)}><Plus className="h-4 w-4" />เพิ่มตาราง</Button>}</CardHeader>
+    <CardContent>
+      {query.isLoading ? <TableSkeleton rows={3} cols={4} /> : query.data?.length ? <div className="space-y-2">{query.data.map((item) => <div key={item.id} className="grid gap-2 rounded-lg border border-border px-3.5 py-3 text-sm md:grid-cols-4"><span className="font-medium">{item.name}</span><span>{formatDate(item.effectiveFrom)}{item.effectiveTo ? ` – ${formatDate(item.effectiveTo)}` : ' เป็นต้นไป'}</span><span>{item.workStartTime}–{item.workEndTime}</span><span className="text-muted-foreground">{item.workingDays.replaceAll(',', ' · ')} · ผ่อนผัน {item.flexArrivalMinutes} นาที</span></div>)}</div> : <EmptyState title="ยังไม่มีตารางเวลาที่กำหนดตามวันที่" description="ค่าการลงเวลาปัจจุบันยังคงใช้จากการตั้งค่าระบบ" />}
+    </CardContent>
+    <Dialog open={open} onOpenChange={setOpen}><DialogContent title="เพิ่มตารางเวลาทำงาน" className="max-w-lg"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); mutation.mutate(); }}>
+      <Field label="ชื่อ" required><Input value={form.name} onChange={(e) => setForm((f) => ({...f,name:e.target.value}))} required /></Field>
+      <div className="grid gap-4 sm:grid-cols-2"><Field label="เริ่มใช้วันที่" required><Input type="date" value={form.effectiveFrom} onChange={(e) => setForm((f) => ({...f,effectiveFrom:e.target.value}))} required /></Field><Field label="สิ้นสุดวันที่"><Input type="date" value={form.effectiveTo} onChange={(e) => setForm((f) => ({...f,effectiveTo:e.target.value}))} /></Field></div>
+      <div className="grid grid-cols-7 gap-1">{dayOptions.map(([token,label]) => <label key={token} className="flex flex-col items-center gap-1 rounded-lg border border-border p-2 text-xs"><Switch checked={form.workingDays.includes(token)} onCheckedChange={(checked) => setForm((f) => ({...f,workingDays:checked?[...f.workingDays,token]:f.workingDays.filter((day)=>day!==token)}))}/>{label}</label>)}</div>
+      <div className="grid gap-4 sm:grid-cols-3"><Field label="เวลาเริ่มงาน"><Input type="time" value={form.workStartTime} onChange={(e)=>setForm((f)=>({...f,workStartTime:e.target.value}))}/></Field><Field label="เวลาเลิกงาน"><Input type="time" value={form.workEndTime} onChange={(e)=>setForm((f)=>({...f,workEndTime:e.target.value}))}/></Field><Field label="ผ่อนผัน (นาที)"><Input type="number" min="0" value={form.flexArrivalMinutes} onChange={(e)=>setForm((f)=>({...f,flexArrivalMinutes:Number(e.target.value)}))}/></Field></div>
+      <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={()=>setOpen(false)}>ยกเลิก</Button><Button type="submit" loading={mutation.isPending}>เพิ่ม</Button></div>
+    </form></DialogContent></Dialog>
+  </Card>;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +453,7 @@ function OrgSettings({ canWrite }: { canWrite: boolean }) {
  * Payroll rules editor. Every value the calculation engine reads is editable
  * here, which is why no rate or threshold is hardcoded in the backend.
  */
-function RuleSettings({ canWrite }: { canWrite: boolean }) {
+export function RuleSettings({ canWrite, groups, keys }: { canWrite: boolean; groups?: string[]; keys?: string[] }) {
   const queryClient = useQueryClient();
   const { data = [], isLoading } = useQuery({
     queryKey: ['settings'],
@@ -443,7 +475,9 @@ function RuleSettings({ canWrite }: { canWrite: boolean }) {
 
   if (isLoading) return <Card className="h-96 animate-pulse" />;
 
-  const grouped = data.reduce<Record<string, PayrollSetting[]>>((acc, setting) => {
+  const grouped = data.filter((setting) =>
+    setting.key !== 'COUNT_WEEKEND_AS_WORKDAY' && (!groups || groups.includes(setting.group)) && (!keys || keys.includes(setting.key))
+  ).reduce<Record<string, PayrollSetting[]>>((acc, setting) => {
     (acc[setting.group] ??= []).push(setting);
     return acc;
   }, {});
@@ -482,7 +516,30 @@ function RuleSettings({ canWrite }: { canWrite: boolean }) {
                 label={setting.label}
                 hint={setting.description ?? undefined}
               >
-                {setting.valueType === 'BOOLEAN' ? (
+                {setting.key === 'WORKING_DAYS' ? (
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {[
+                      ['MON', 'จันทร์'], ['TUE', 'อังคาร'], ['WED', 'พุธ'], ['THU', 'พฤหัสบดี'],
+                      ['FRI', 'ศุกร์'], ['SAT', 'เสาร์'], ['SUN', 'อาทิตย์'],
+                    ].map(([token, label]) => {
+                      const selected = new Set(valueOf(setting).split(',').filter(Boolean));
+                      return (
+                        <label key={token} className="flex items-center gap-2 rounded-lg border border-border px-2 py-2 text-xs">
+                          <Switch
+                            checked={selected.has(token)}
+                            disabled={!canWrite}
+                            onCheckedChange={(checked) => {
+                              if (checked) selected.add(token); else selected.delete(token);
+                              const order = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+                              change(setting.key, order.filter((day) => selected.has(day)).join(','));
+                            }}
+                          />
+                          {label}
+                        </label>
+                      );
+                    })}
+                  </div>
+                ) : setting.valueType === 'BOOLEAN' ? (
                   <div className="flex h-10 items-center">
                     <Switch
                       checked={valueOf(setting) === 'true'}
@@ -518,7 +575,6 @@ function RuleSettings({ canWrite }: { canWrite: boolean }) {
                     onChange={(e) => change(setting.key, e.target.value)}
                   />
                 )}
-                <p className="text-[11px] font-mono text-muted-foreground">{setting.key}</p>
               </Field>
             ))}
           </CardContent>
@@ -533,20 +589,25 @@ function RuleSettings({ canWrite }: { canWrite: boolean }) {
 function HolidaySettings({ canWrite }: { canWrite: boolean }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState<string | null>(null);
-  const [form, setForm] = React.useState({ date: '', name: '', isPaid: true });
+  const emptyForm = { date: '', name: '', type: 'COMPANY_HOLIDAY' as const, note: '', isPaid: true };
+  const [form, setForm] = React.useState<{ date: string; name: string; type: 'PUBLIC_HOLIDAY' | 'COMPANY_HOLIDAY'; note: string; isPaid: boolean }>(emptyForm);
 
   const { data = [], isLoading } = useQuery({
     queryKey: ['holidays'],
     queryFn: settingsApi.listHolidays,
   });
 
-  const createMutation = useMutation({
-    mutationFn: () => settingsApi.createHoliday(form),
+  const saveMutation = useMutation({
+    mutationFn: () => editing
+      ? settingsApi.updateHoliday(editing, form)
+      : settingsApi.createHoliday(form),
     onSuccess: () => {
-      toast.success('เพิ่มวันหยุดเรียบร้อยแล้ว');
+      toast.success(editing ? 'แก้ไขวันหยุดเรียบร้อยแล้ว' : 'เพิ่มวันหยุดเรียบร้อยแล้ว');
       setOpen(false);
-      setForm({ date: '', name: '', isPaid: true });
+      setEditing(null);
+      setForm(emptyForm);
       void queryClient.invalidateQueries({ queryKey: ['holidays'] });
     },
     onError: (err) => toast.error(apiErrorMessage(err)),
@@ -589,8 +650,10 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
               <tr>
                 <th>วันที่</th>
                 <th>ชื่อวันหยุด</th>
+                <th>ประเภท</th>
+                <th>หมายเหตุ</th>
                 <th>ได้รับค่าจ้าง</th>
-                <th className="w-[60px]" />
+                <th className="w-[96px]" />
               </tr>
             </thead>
             <tbody>
@@ -598,6 +661,8 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
                 <tr key={holiday.id}>
                   <td>{formatDate(holiday.date)}</td>
                   <td className="font-medium">{holiday.name}</td>
+                  <td><Badge variant={holiday.type === 'PUBLIC_HOLIDAY' ? 'danger' : 'info'}>{holiday.type === 'PUBLIC_HOLIDAY' ? 'วันหยุดราชการ' : 'วันหยุดบริษัท'}</Badge></td>
+                  <td className="text-muted-foreground">{holiday.note || '-'}</td>
                   <td>
                     <Badge variant={holiday.isPaid ? 'success' : 'secondary'}>
                       {holiday.isPaid ? 'ได้รับ' : 'ไม่ได้รับ'}
@@ -605,7 +670,14 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
                   </td>
                   <td>
                     {canWrite && (
-                      <Button
+                      <div className="flex justify-center gap-1"><Button
+                        variant="ghost" size="icon" aria-label="แก้ไข"
+                        onClick={() => {
+                          setEditing(holiday.id);
+                          setForm({ date: holiday.date.slice(0, 10), name: holiday.name, type: holiday.type, note: holiday.note ?? '', isPaid: holiday.isPaid });
+                          setOpen(true);
+                        }}
+                      ><Pencil className="h-4 w-4" /></Button><Button
                         variant="ghost"
                         size="icon"
                         className="text-danger hover:bg-danger-soft"
@@ -613,7 +685,7 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
                         aria-label="ลบ"
                       >
                         <Trash2 className="h-4 w-4" />
-                      </Button>
+                      </Button></div>
                     )}
                   </td>
                 </tr>
@@ -623,12 +695,12 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
         )}
       </CardContent>
 
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent title="เพิ่มวันหยุด" className="max-w-md">
+      <Dialog open={open} onOpenChange={(value) => { setOpen(value); if (!value) { setEditing(null); setForm(emptyForm); } }}>
+        <DialogContent title={editing ? 'แก้ไขวันหยุด' : 'เพิ่มวันหยุด'} className="max-w-md">
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              createMutation.mutate();
+              saveMutation.mutate();
             }}
             className="space-y-4"
           >
@@ -648,6 +720,15 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
                 required
               />
             </Field>
+            <Field label="ประเภท" required>
+              <Select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value as typeof f.type }))}>
+                <option value="PUBLIC_HOLIDAY">วันหยุดราชการ</option>
+                <option value="COMPANY_HOLIDAY">วันหยุดบริษัท</option>
+              </Select>
+            </Field>
+            <Field label="หมายเหตุ">
+              <Textarea value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} rows={2} />
+            </Field>
             <div className="flex items-center justify-between rounded-lg border border-border px-3.5 py-2.5">
               <span className="text-sm font-medium">ได้รับค่าจ้างในวันหยุดนี้</span>
               <Switch
@@ -659,8 +740,8 @@ function HolidaySettings({ canWrite }: { canWrite: boolean }) {
               <Button type="button" variant="outline" onClick={() => setOpen(false)}>
                 ยกเลิก
               </Button>
-              <Button type="submit" loading={createMutation.isPending}>
-                เพิ่ม
+              <Button type="submit" loading={saveMutation.isPending}>
+                {editing ? 'บันทึก' : 'เพิ่ม'}
               </Button>
             </div>
           </form>

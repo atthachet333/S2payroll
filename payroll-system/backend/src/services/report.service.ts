@@ -130,7 +130,11 @@ async function attendanceReport(
           },
         }
       : {}),
-    ...(params.departmentId ? { employee: { departmentId: params.departmentId } } : {}),
+    employee: {
+      attendanceRequired: true,
+      ...(params.departmentId ? { departmentId: params.departmentId } : {}),
+      ...(variant === 'late' ? { employmentType: { not: 'DAILY' } } : {}),
+    },
     ...(params.employeeId ? { employeeId: params.employeeId } : {}),
     ...(variant === 'ot' ? { otMinutes: { gt: 0 } } : {}),
     ...(variant === 'late' ? { lateMinutes: { gt: 0 } } : {}),

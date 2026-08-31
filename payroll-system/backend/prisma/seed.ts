@@ -227,7 +227,7 @@ async function seedAttendance() {
       } // absent
 
       const metrics = computeAttendanceMetrics(
-        { workDate, checkIn, checkOut, isHoliday: false, isWeekend: false, isOnLeave: false },
+        { workDate, checkIn, checkOut, isHoliday: false, isWeekend: false, isOnLeave: false, employmentType: employee.employmentType },
         settings
       );
 

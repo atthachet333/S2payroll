@@ -70,6 +70,15 @@ export function formatDate(value: string | Date | null | undefined): string {
   return `${d.date()} ${THAI_MONTHS_SHORT[d.month()]} ${d.year()}`;
 }
 
+const THAI_WEEKDAYS_SHORT = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+
+export function formatDateWithWeekday(value: string | Date | null | undefined): string {
+  if (!value) return '-';
+  const d = dayjs(value);
+  if (!d.isValid()) return '-';
+  return `${THAI_WEEKDAYS_SHORT[d.day()]} ${formatDate(value)}`;
+}
+
 export function formatDateLong(value: string | Date | null | undefined): string {
   if (!value) return '-';
   const d = dayjs(value);
@@ -100,15 +109,15 @@ export function formatTime(value: string | Date | null | undefined): string {
 export const formatIsoDate = (value: string | Date | null | undefined): string =>
   value ? dayjs(value).format('YYYY-MM-DD') : '';
 
-/** 495 -> "8 ชม. 15 น." */
+/** 495 -> "8 ชม. 15 นาที"; exact minutes are never rounded away. */
 export function formatMinutes(minutes: number | null | undefined): string {
   if (minutes === null || minutes === undefined) return '-';
   if (minutes === 0) return '0';
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
-  if (h === 0) return `${m} น.`;
+  if (h === 0) return `${m} นาที`;
   if (m === 0) return `${h} ชม.`;
-  return `${h} ชม. ${m} น.`;
+  return `${h} ชม. ${m} นาที`;
 }
 
 export const formatHours = (value: string | number | null | undefined): string =>

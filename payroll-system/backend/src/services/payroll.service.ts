@@ -6,13 +6,15 @@ import {
   type RoleCode,
 } from '@prisma/client';
 import { prisma } from '../plugins/prisma.js';
-import { loadSettings, settingsFromSnapshot, type SettingsMap } from './settings.service.js';
+import { loadSettings, loadSettingsForDate, settingsFromSnapshot, type SettingsMap } from './settings.service.js';
 import { calculatePayroll, type AttendanceAggregate, type ManualItem } from './payroll-calculator.service.js';
 import { recordAudit } from './audit.service.js';
 import { runPrePayrollChecks } from './pre-payroll-check.service.js';
 import { dec, toPrismaDecimal, toPrismaHours, money, Decimal } from '../utils/money.js';
-import { cycleBounds, dayjs, eachDay, isWeekend, thaiMonthLabel } from '../utils/datetime.js';
+import { companyClock, cycleBounds, dayjs, eachDay, formatDateOnly, thaiMonthLabel } from '../utils/datetime.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
+import { isScheduledWorkday } from './schedule-policy.service.js';
+import { payrollEligibleEmployeeWhere } from './employee-payroll-eligibility.service.js';
 
 export interface Actor {
   userId: string;
@@ -206,16 +208,21 @@ export async function aggregateAttendance(
   periodId: string
 ): Promise<{ aggregates: Map<string, AttendanceAggregate>; workingDays: number }> {
   const period = await getPeriod(periodId);
+  const scheduleSettings = await loadSettings();
 
   const [records, leaves, holidays] = await Promise.all([
     prisma.attendanceRecord.findMany({
-      where: { workDate: { gte: period.startDate, lte: period.endDate } },
+      where: {
+        workDate: { gte: period.startDate, lte: period.endDate },
+        employee: { attendanceRequired: true },
+      },
     }),
     prisma.leaveRecord.findMany({
       where: {
         status: 'APPROVED',
         startDate: { lte: period.endDate },
         endDate: { gte: period.startDate },
+        employee: { leaveTrackingRequired: true },
       },
     }),
     prisma.holiday.findMany({
@@ -227,7 +234,7 @@ export async function aggregateAttendance(
 
   // Calendar working days in the period: weekdays that are not public holidays.
   const workingDays = eachDay(period.startDate, period.endDate).filter(
-    (d) => !isWeekend(d) && !holidayKeys.has(dayjs.utc(d).format('YYYY-MM-DD'))
+    (d) => isScheduledWorkday(d, scheduleSettings) && !holidayKeys.has(dayjs.utc(d).format('YYYY-MM-DD'))
   ).length;
 
   const result = new Map<string, AttendanceAggregate>();
@@ -281,7 +288,7 @@ export async function aggregateAttendance(
     const from = leave.startDate < period.startDate ? period.startDate : leave.startDate;
     const to = leave.endDate > period.endDate ? period.endDate : leave.endDate;
     const days = eachDay(from, to).filter(
-      (d) => !isWeekend(d) && !holidayKeys.has(dayjs.utc(d).format('YYYY-MM-DD'))
+      (d) => isScheduledWorkday(d, scheduleSettings) && !holidayKeys.has(dayjs.utc(d).format('YYYY-MM-DD'))
     ).length;
     agg.leaveDays += days;
     if (!leave.isPaid) agg.unpaidLeaveDays += days;
@@ -327,16 +334,24 @@ export async function calculatePeriod(
     }
   }
 
-  const settings = await loadSettings();
+  const settings = await loadSettingsForDate(period.endDate);
   const { aggregates, workingDays: periodWorkingDays } = await aggregateAttendance(periodId);
 
   const employees = await prisma.employee.findMany({
-    where: {
-      status: { in: ['ACTIVE', 'PROBATION'] },
-      startDate: { lte: period.endDate },
-      OR: [{ endDate: null }, { endDate: { gte: period.startDate } }],
+    where: payrollEligibleEmployeeWhere(period),
+    include: {
+      department: true,
+      position: true,
+      payProfiles: {
+        where: {
+          isActive: true,
+          effectiveFrom: { lte: period.endDate },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.endDate } }],
+        },
+        orderBy: { effectiveFrom: 'desc' },
+        take: 1,
+      },
     },
-    include: { department: true, position: true },
   });
 
   // Manual lines and adjustments survive a recalculation.
@@ -380,7 +395,7 @@ export async function calculatePeriod(
     const employedFrom = employee.startDate > period.startDate ? employee.startDate : period.startDate;
     const employedTo =
       employee.endDate && employee.endDate < period.endDate ? employee.endDate : period.endDate;
-    const employedDays = eachDay(employedFrom, employedTo).filter((d) => !isWeekend(d)).length;
+    const employedDays = eachDay(employedFrom, employedTo).filter((d) => isScheduledWorkday(d, settings)).length;
 
     const prior = existingByEmployee.get(employee.id);
     const manualIncomes: ManualItem[] = (prior?.incomes ?? []).map((i) => ({
@@ -410,9 +425,13 @@ export async function calculatePeriod(
           positionName: employee.position?.name ?? null,
           employmentType: employee.employmentType,
           baseSalary: employee.baseSalary,
+          payType: employee.payProfiles[0]?.payType,
+          monthlySalary: employee.payProfiles[0]?.monthlySalary,
+          hourlyRate: employee.payProfiles[0]?.hourlyRate,
           ssoEnabled: employee.ssoEnabled,
           taxEnabled: employee.taxEnabled,
           otEligible: employee.otEligible,
+          attendanceRequired: employee.attendanceRequired,
           employedDays,
         },
         attendance,
@@ -606,6 +625,7 @@ export const startAttendanceReview = (periodId: string, actor: Actor) =>
   );
 
 export async function approvePeriod(periodId: string, actor: Actor) {
+  await assertPeriodFinalizable(periodId);
   const settings = await loadSettings();
   if (settings.boolean('BLOCK_APPROVE_ON_MISSING_DATA')) {
     const blocking = await prisma.payrollEmployee.count({
@@ -627,8 +647,9 @@ export async function approvePeriod(periodId: string, actor: Actor) {
   );
 }
 
-export const markPaid = (periodId: string, actor: Actor, paymentDate?: string) =>
-  transition(
+export async function markPaid(periodId: string, actor: Actor, paymentDate?: string) {
+  await assertPeriodFinalizable(periodId);
+  return transition(
     periodId,
     PayrollPeriodStatus.PAID,
     actor,
@@ -639,6 +660,7 @@ export const markPaid = (periodId: string, actor: Actor, paymentDate?: string) =
     },
     'PAYROLL_MARK_PAID'
   );
+}
 
 /**
  * Lock a period. After this, financial values are immutable and every
@@ -646,6 +668,7 @@ export const markPaid = (periodId: string, actor: Actor, paymentDate?: string) =
  * reproducible.
  */
 export async function lockPeriod(periodId: string, actor: Actor) {
+  await assertPeriodFinalizable(periodId);
   const period = await getPeriod(periodId);
   assertTransition(period.status, PayrollPeriodStatus.LOCKED);
 
@@ -673,6 +696,19 @@ export async function lockPeriod(periodId: string, actor: Actor) {
   });
 
   return updated;
+}
+
+async function assertPeriodFinalizable(periodId: string): Promise<void> {
+  const period = await prisma.payrollPeriod.findUnique({ where: { id: periodId }, select: { endDate: true } });
+  if (!period) throw notFound('Payroll period');
+  const settings = await loadSettingsForDate(period.endDate);
+  const clock = companyClock();
+  const end = formatDateOnly(period.endDate);
+  const endKey = settings.string('MONTHLY_WORK_END_TIME') ? 'MONTHLY_WORK_END_TIME' : 'WORK_END_TIME';
+  const close = settings.timeMinutes(endKey) + Math.max(0, settings.number('ATTENDANCE_CLOSE_GRACE_MINUTES'));
+  if (end > clock.date || (end === clock.date && clock.minutes < close)) {
+    throw badRequest('รอบเงินเดือนยังไม่สิ้นสุดวันนี้ สามารถดูประมาณการได้ แต่ยังไม่สามารถอนุมัติ จ่าย หรือล็อก');
+  }
 }
 
 /**

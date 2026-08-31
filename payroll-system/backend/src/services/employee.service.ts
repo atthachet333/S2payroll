@@ -1,12 +1,20 @@
-import { EmployeeStatus, Prisma } from '@prisma/client';
+import { AttendanceStatus, EmployeeStatus, Prisma } from '@prisma/client';
 import { prisma } from '../plugins/prisma.js';
 import { recordAudit } from './audit.service.js';
 import { dec, toPrismaDecimal } from '../utils/money.js';
 import { dayjs } from '../utils/datetime.js';
 import { conflict, notFound } from '../utils/errors.js';
+import {
+  completenessWhere,
+  evaluateEmployeeProfileCompleteness,
+  withProfileCompleteness,
+  type CompletenessFilter,
+} from './employee-completeness.service.js';
 import type { Actor } from './payroll.service.js';
 
 export interface EmployeeListParams {
+  /** Master-data completeness, evaluated by employee-completeness.service. */
+  completeness?: CompletenessFilter;
   page: number;
   pageSize: number;
   search?: string;
@@ -37,6 +45,9 @@ export async function listEmployees(params: EmployeeListParams) {
           ],
         }
       : {}),
+    // Applied in the database so it composes with pagination and the other
+    // filters rather than trimming an already-paged slice.
+    ...(params.completeness ? completenessWhere(params.completeness) : {}),
   };
 
   const [items, total] = await Promise.all([
@@ -50,7 +61,12 @@ export async function listEmployees(params: EmployeeListParams) {
     prisma.employee.count({ where }),
   ]);
 
-  return { items, total, page: params.page, pageSize: params.pageSize };
+  return {
+    items: items.map(withProfileCompleteness),
+    total,
+    page: params.page,
+    pageSize: params.pageSize,
+  };
 }
 
 export async function getEmployee(id: string) {
@@ -62,7 +78,7 @@ export async function getEmployee(id: string) {
     },
   });
   if (!employee) throw notFound('Employee');
-  return employee;
+  return withProfileCompleteness(employee);
 }
 
 export interface EmployeeInput {
@@ -86,6 +102,8 @@ export interface EmployeeInput {
   ssoEnabled?: boolean;
   taxEnabled?: boolean;
   otEligible?: boolean;
+  attendanceRequired?: boolean;
+  leaveTrackingRequired?: boolean;
   status?: EmployeeStatus;
   note?: string | null;
 }
@@ -118,6 +136,8 @@ export async function createEmployee(input: EmployeeInput, actor: Actor) {
       ssoEnabled: input.ssoEnabled ?? true,
       taxEnabled: input.taxEnabled ?? true,
       otEligible: input.otEligible ?? true,
+      attendanceRequired: input.attendanceRequired ?? true,
+      leaveTrackingRequired: input.leaveTrackingRequired ?? true,
       status: input.status ?? EmployeeStatus.ACTIVE,
       note: input.note ?? null,
       createdBy: actor.userId,
@@ -166,6 +186,8 @@ export async function updateEmployee(
   if (input.ssoEnabled !== undefined) data.ssoEnabled = input.ssoEnabled;
   if (input.taxEnabled !== undefined) data.taxEnabled = input.taxEnabled;
   if (input.otEligible !== undefined) data.otEligible = input.otEligible;
+  if (input.attendanceRequired !== undefined) data.attendanceRequired = input.attendanceRequired;
+  if (input.leaveTrackingRequired !== undefined) data.leaveTrackingRequired = input.leaveTrackingRequired;
   if (input.status !== undefined) data.status = input.status;
   if (input.note !== undefined) data.note = input.note;
   if (input.departmentId !== undefined) {
@@ -298,6 +320,32 @@ export async function employeeSummary(id: string, from?: Date, to?: Date) {
   };
 }
 
+export async function employeeAttendanceHistory(
+  id: string,
+  year: number,
+  month: number,
+  page: number,
+  pageSize: number,
+  status?: string
+) {
+  await getEmployee(id);
+  const start = dayjs.utc(`${year}-${String(month).padStart(2, '0')}-01`).startOf('month');
+  const end = start.endOf('month').startOf('day');
+  const where: Prisma.AttendanceRecordWhereInput = {
+    employeeId: id,
+    workDate: { gte: start.toDate(), lte: end.toDate() },
+    ...(status ? { status: status as AttendanceStatus } : {}),
+  };
+  const [items, total] = await Promise.all([
+    prisma.attendanceRecord.findMany({
+      where, orderBy: { workDate: 'desc' }, skip: (page - 1) * pageSize, take: pageSize,
+      include: { employee: { select: { firstName: true, lastName: true, employmentType: true } } },
+    }),
+    prisma.attendanceRecord.count({ where }),
+  ]);
+  return { items, total, page, pageSize };
+}
+
 // --- departments & positions -------------------------------------------------
 
 export const listDepartments = () =>
@@ -324,3 +372,40 @@ export const updatePosition = (
   id: string,
   data: { name?: string; departmentId?: string | null; isActive?: boolean }
 ) => prisma.position.update({ where: { id }, data });
+
+/**
+ * Counters for the Employees page header.
+ *
+ * Evaluated with the same helper the rows use, so the badge on a row can never
+ * disagree with the count above the table.
+ */
+export async function employeeCompletenessSummary() {
+  const employees = await prisma.employee.findMany({
+    select: {
+      employeeCode: true, firstName: true, lastName: true, employmentType: true,
+      departmentId: true, positionId: true, startDate: true, status: true, baseSalary: true,
+      attendanceRequired: true, leaveTrackingRequired: true,
+    },
+    orderBy: { employeeCode: 'asc' },
+  });
+
+  const evaluated = employees.map((employee) => ({
+    employeeCode: employee.employeeCode,
+    name: `${employee.firstName} ${employee.lastName}`.trim(),
+    ...evaluateEmployeeProfileCompleteness(employee),
+  }));
+
+  return {
+    total: evaluated.length,
+    complete: evaluated.filter((e) => e.complete).length,
+    incomplete: evaluated.filter((e) => !e.complete).length,
+    incompleteEmployees: evaluated
+      .filter((e) => !e.complete)
+      .map((e) => ({
+        employeeCode: e.employeeCode,
+        name: e.name,
+        missingCount: e.missingCount,
+        missingLabels: e.missingLabels,
+      })),
+  };
+}

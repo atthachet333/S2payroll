@@ -10,6 +10,7 @@ import {
   positionSchema,
   updateSettingsSchema,
   updateUserSchema,
+  workScheduleProfileSchema,
 } from '../schemas/index.js';
 import * as settingsService from '../services/settings.service.js';
 import * as employeeService from '../services/employee.service.js';
@@ -19,6 +20,8 @@ import { ROLE_LABELS, ROLE_PERMISSIONS } from '../config/permissions.js';
 import { getActor } from '../middleware/actor.js';
 import { dayjs, eachDay } from '../utils/datetime.js';
 import { badRequest, conflict, notFound } from '../utils/errors.js';
+import * as workScheduleService from '../services/work-schedule-profile.service.js';
+import * as payProfileService from '../services/pay-profile.service.js';
 
 export default async function settingsRoutes(app: FastifyInstance): Promise<void> {
   // --- payroll / attendance / OT rules ---------------------------------------
@@ -49,6 +52,10 @@ export default async function settingsRoutes(app: FastifyInstance): Promise<void
     });
 
     return reply.send(updated);
+  });
+
+  app.get('/pay-configurations', { preHandler: [app.requirePermission('settings:read')] }, async (_request, reply) => {
+    return reply.send(await payProfileService.listEmployeePayConfigurations());
   });
 
   // --- company ---------------------------------------------------------------
@@ -307,13 +314,57 @@ export default async function settingsRoutes(app: FastifyInstance): Promise<void
         data: {
           date: dayjs.utc(body.date).startOf('day').toDate(),
           name: body.name,
+          type: body.type,
+          note: body.note || null,
           isPaid: body.isPaid,
           createdBy: actor.userId,
         },
       });
+      await recordAudit({
+        action: 'HOLIDAY_CREATE', entity: 'Holiday', entityId: holiday.id,
+        newValue: { date: holiday.date, name: holiday.name, type: holiday.type },
+        ...auditContext(request),
+      });
       return reply.status(201).send(holiday);
     }
   );
+
+  app.patch(
+    '/holidays/:id',
+    { preHandler: [app.requirePermission('settings:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = holidaySchema.partial().parse(request.body);
+      const current = await prisma.holiday.findUnique({ where: { id } });
+      if (!current) throw notFound('Holiday');
+      const holiday = await prisma.holiday.update({
+        where: { id },
+        data: {
+          ...(body.date ? { date: dayjs.utc(body.date).startOf('day').toDate() } : {}),
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.type !== undefined ? { type: body.type } : {}),
+          ...(body.note !== undefined ? { note: body.note || null } : {}),
+          ...(body.isPaid !== undefined ? { isPaid: body.isPaid } : {}),
+        },
+      });
+      await recordAudit({
+        action: 'HOLIDAY_UPDATE', entity: 'Holiday', entityId: id,
+        oldValue: { date: current.date, name: current.name, type: current.type },
+        newValue: { date: holiday.date, name: holiday.name, type: holiday.type },
+        ...auditContext(request),
+      });
+      return reply.send(holiday);
+    }
+  );
+
+  app.get('/work-schedules', { preHandler: [app.requirePermission('settings:read')] }, async (_request, reply) =>
+    reply.send(await workScheduleService.listWorkSchedules())
+  );
+
+  app.post('/work-schedules', { preHandler: [app.requirePermission('settings:write')] }, async (request, reply) => {
+    const body = workScheduleProfileSchema.parse(request.body);
+    return reply.status(201).send(await workScheduleService.createWorkSchedule(body, getActor(request)));
+  });
 
   app.delete(
     '/holidays/:id',
