@@ -2,11 +2,13 @@ import * as React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Eye, Pencil, Plus, Search, UserMinus, Users } from 'lucide-react';
+import { CalendarPlus, Eye, Pencil, Plus, RotateCcw, Search, UserMinus, Users } from 'lucide-react';
 import { employeeApi, settingsApi, POLL_INTERVAL_MS } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
 import { useAuth } from '@/features/auth/AuthContext';
 import EmployeeFormDialog from '@/features/employees/EmployeeFormDialog';
+import RestoreEmployeeDialog from '@/features/employees/RestoreEmployeeDialog';
+import ManualAttendanceDialog from '@/features/employees/ManualAttendanceDialog';
 import EmployeeDetailDrawer from '@/features/employees/EmployeeDetailDrawer';
 import {
   Badge,
@@ -36,6 +38,15 @@ function useDebounced<T>(value: T, delay = 350): T {
   return debounced;
 }
 
+/** Statuses that mean the person is currently on the payroll. */
+const ACTIVE_STATUSES: string[] = ['ACTIVE', 'PROBATION'];
+/**
+ * The single predicate behind the status action, so deactivate and restore can
+ * never both appear on one row: one is shown when this is true, the other when
+ * it is false.
+ */
+const isWorking = (status: string): boolean => ACTIVE_STATUSES.includes(status);
+
 export default function EmployeesPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -53,6 +64,8 @@ export default function EmployeesPage() {
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Employee | null>(null);
   const [deactivating, setDeactivating] = React.useState<Employee | null>(null);
+  const [restoring, setRestoring] = React.useState<Employee | null>(null);
+  const [addingAttendance, setAddingAttendance] = React.useState<Employee | null>(null);
   const [viewing, setViewing] = React.useState<Employee | null>(null);
   const [deactivateReason, setDeactivateReason] = React.useState('');
 
@@ -262,16 +275,48 @@ export default function EmployeesPage() {
                               <Pencil className="h-4 w-4" />
                             </Button>
                           )}
-                          {canWrite && employee.status === 'ACTIVE' && (
+                          {/* Offered for everyone, current staff and former
+                              staff alike. Somebody's status *today* says
+                              nothing about whether a day they worked last month
+                              needs recording - HR routinely has to correct
+                              attendance from before a person left. The date is
+                              validated against their employment period instead. */}
+                          {canWrite && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => setAddingAttendance(employee)}
+                              aria-label="เพิ่มวันมาทำงาน"
+                              title="เพิ่มวันมาทำงาน"
+                            >
+                              <CalendarPlus className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {/* Exactly one status action per row: deactivate for
+                              someone working, restore for someone who has left.
+                              They are mutually exclusive by construction. */}
+                          {canWrite && isWorking(employee.status) && (
                             <Button
                               variant="ghost"
                               size="icon"
                               className="text-danger hover:bg-danger-soft"
                               onClick={() => setDeactivating(employee)}
-                              aria-label="ปิดการใช้งาน"
-                              title="ปิดการใช้งาน"
+                              aria-label="กำหนดว่าไม่ทำงานแล้ว"
+                              title="กำหนดว่าไม่ทำงานแล้ว"
                             >
                               <UserMinus className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {canWrite && !isWorking(employee.status) && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="text-success hover:bg-success-soft"
+                              onClick={() => setRestoring(employee)}
+                              aria-label="ให้กลับมาทำงาน"
+                              title="ให้กลับมาทำงาน"
+                            >
+                              <RotateCcw className="h-4 w-4" />
                             </Button>
                           )}
                         </div>
@@ -294,6 +339,13 @@ export default function EmployeesPage() {
       </Card>
 
       <EmployeeFormDialog open={formOpen} onOpenChange={setFormOpen} employee={editing} />
+
+      <RestoreEmployeeDialog employee={restoring} onClose={() => setRestoring(null)} />
+
+      <ManualAttendanceDialog
+        employee={addingAttendance}
+        onClose={() => setAddingAttendance(null)}
+      />
 
       <EmployeeDetailDrawer
         employee={viewing}

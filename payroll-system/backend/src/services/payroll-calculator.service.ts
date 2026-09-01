@@ -1,7 +1,12 @@
 import { EmploymentType, PayrollEmployeeStatus, PayrollItemKind } from '@prisma/client';
 import { Decimal, dec, money, minutesToHours, hours } from '../utils/money.js';
 import type { PayrollSettings, TaxBracket } from './settings.service.js';
-import { lateDeductionHours } from '../utils/attendance-math.js';
+import {
+  priceAbsenceDeduction,
+  priceLateDeduction,
+  priceLeaveDeduction,
+} from '../utils/deduction-pricing.js';
+import { resolveReadiness } from '../utils/payroll-readiness.js';
 
 /**
  * Isolated payroll calculation engine.
@@ -35,6 +40,35 @@ export interface EmployeeInput {
   attendanceRequired?: boolean;
   /** Days actually employed within the period, used for pro-rating new hires and leavers. */
   employedDays?: number;
+  /**
+   * Per-employee overrides. A null field means "not configured for this
+   * employee" and falls through to the company setting; a 0 means "deduct
+   * nothing" and wins. Absent entirely, every rule behaves exactly as it did
+   * before employee policies existed.
+   */
+  policy?: EmployeePolicyView | null;
+  /**
+   * False when no usable wage rate was found for this employee in this period.
+   * The result is then worked time with no money attached - never a salary.
+   */
+  payConfigured?: boolean;
+  /** True for staff excluded from payroll by company policy. */
+  excluded?: boolean;
+}
+
+export type LateDeductionMode = 'NONE' | 'PER_HOUR_FROM_BASE' | 'FIXED_AMOUNT';
+export type LeaveDeductionMode = 'NONE' | 'PER_DAY_FROM_BASE' | 'FIXED_AMOUNT';
+export type AbsenceDeductionMode = 'NONE' | 'PER_DAY_FROM_BASE' | 'FIXED_AMOUNT';
+
+export interface EmployeePolicyView {
+  lateDeductionType?: LateDeductionMode | null;
+  lateDeductionAmount?: Decimal | string | number | null;
+  leaveDeductionType?: LeaveDeductionMode | null;
+  leaveDeductionAmount?: Decimal | string | number | null;
+  absenceDeductionType?: AbsenceDeductionMode | null;
+  absenceDeductionAmount?: Decimal | string | number | null;
+  socialSecurityAmount?: Decimal | string | number | null;
+  taxAmount?: Decimal | string | number | null;
 }
 
 export interface AttendanceAggregate {
@@ -46,7 +80,18 @@ export interface AttendanceAggregate {
   leaveDays: number;
   unpaidLeaveDays: number;
   lateCount: number;
+  /** Observed lateness. Kept so a screen can show what actually happened. */
   lateMinutes: number;
+  /**
+   * Lateness after the company floor, summed per day. This, not lateMinutes,
+   * is what money is charged from - see chargeableLateHours for the ordering.
+   */
+  roundedLateMinutes: number;
+  /** Observed and floored early leave, reported separately for the same reason. */
+  earlyLeaveMinutes: number;
+  roundedEarlyLeaveMinutes: number;
+  /** Approved OT before the floor, so the discarded remainder stays visible. */
+  actualOtMinutes: number;
   /** Total paid minutes worked, net of the unpaid break. */
   workedMinutes: number;
   /** Paid minutes up to the standard working day, excluding overtime. */
@@ -76,6 +121,32 @@ export interface CalculationInput {
   manualIncomes?: ManualItem[];
   /** Extra deduction lines entered by payroll staff (loan, other). */
   manualDeductions?: ManualItem[];
+  /**
+   * Pre-computed per-day pay for hourly staff, priced day by day at the rate in
+   * force on each work date. When present it is authoritative for the base pay
+   * of a DAILY/HOURLY employee - the calculator does not reprice a whole month
+   * at today's rate.
+   */
+  dailyEarnings?: DailyEarningsInput;
+  /** True while the period is still open, so figures are a preview. */
+  isEstimate?: boolean;
+}
+
+export interface DailyEarningsInput {
+  /** Sum of every day priced at the rate in force on that day. */
+  amount: Decimal | string | number;
+  /** The true observed duration across the period. */
+  totalWorkedMinutes: number;
+  /** Unpaid breaks removed for days past the eight-hour threshold. */
+  totalBreakDeductionMinutes: number;
+  /** Minutes actually paid for, after the break and the company floor. */
+  totalPayableMinutes: number;
+  /** What the floor discarded across the period. */
+  totalRoundedAwayMinutes: number;
+  ratedMinutes: number;
+  unratedMinutes: number;
+  unratedDays: number;
+  workedDays: number;
 }
 
 export interface CalculatedLine {
@@ -97,6 +168,9 @@ export interface CalculationResult {
 
   hourlyRate: Decimal;
   dailyRate: Decimal;
+  /** Display bases for a monthly salary: salary / divisor, and that / hours. */
+  dailyBase: Decimal;
+  hourlyBase: Decimal;
 
   baseSalary: Decimal;
   otAmount: Decimal;
@@ -106,9 +180,28 @@ export interface CalculationResult {
   otherIncome: Decimal;
   grossIncome: Decimal;
 
+  /**
+   * DAILY only. Worked time became paid time by losing an unpaid break and
+   * being floored to a 15-minute increment; both figures are reported so a
+   * payslip can show the derivation. Zero for MONTHLY, whose salary does not
+   * come from an hourly count.
+   */
+  breakDeductionMinutes: number;
+  payableMinutes: number;
+  /** What the company interval discarded from the daily worked time. */
+  roundedAwayMinutes: number;
+  /** Lateness after the floor, and early leave observed and floored. */
+  roundedLateMinutes: number;
+  earlyLeaveMinutes: number;
+  roundedEarlyLeaveMinutes: number;
+  /** Approved OT before the floor, so the discarded remainder stays visible. */
+  actualOtMinutes: number;
+
   lateDeduction: Decimal;
   /** Whole-hour blocks charged for lateness: ceil(lateMinutes / 60). */
   lateDeductionHours: number;
+  /** Unpaid leave, priced separately from absence by its own employee policy. */
+  leaveDeduction: Decimal;
   absenceDeduction: Decimal;
   socialSecurity: Decimal;
   tax: Decimal;
@@ -123,6 +216,10 @@ export interface CalculationResult {
 
   status: PayrollEmployeeStatus;
   reviewNotes: string[];
+  /** False when no wage rate was known - the amounts are not a final salary. */
+  payConfigured: boolean;
+  /** True when the figures are a preview rather than a settled amount. */
+  isEstimate: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +254,13 @@ export function dailyRate(employee: EmployeeInput, settings: PayrollSettings): D
   if (employee.payType === 'HOURLY' && employee.hourlyRate != null) {
     return money(dec(employee.hourlyRate).times(paidHoursPerDay(settings)));
   }
-  const base = dec(employee.baseSalary);
+  // employee_pay_profiles is the canonical source of compensation. The legacy
+  // employees.base_salary column is only a fallback for records that predate
+  // pay profiles; reading it in preference would let the two disagree.
+  const base =
+    employee.payType === 'MONTHLY' && employee.monthlySalary != null
+      ? dec(employee.monthlySalary)
+      : dec(employee.baseSalary);
   const standardHours = paidHoursPerDay(settings);
 
   switch (employee.employmentType) {
@@ -183,6 +286,20 @@ export function hourlyRate(employee: EmployeeInput, settings: PayrollSettings): 
   if (standardHours.isZero()) return new Decimal(0);
   // 600 / 8 = 75 THB per hour.
   return money(dailyRate(employee, settings).dividedBy(standardHours));
+}
+
+/**
+ * Does this employee have a wage rate at all?
+ *
+ * The pay profile is canonical; employees.base_salary is only consulted as the
+ * legacy fallback for records that predate pay profiles. Zero is not a rate -
+ * it is the absence of one, and paying against it would state a salary of 0 as
+ * though it were a real figure.
+ */
+function hasUsableRate(employee: EmployeeInput): boolean {
+  if (employee.payType === 'MONTHLY') return dec(employee.monthlySalary ?? 0).greaterThan(0);
+  if (employee.payType === 'HOURLY') return dec(employee.hourlyRate ?? 0).greaterThan(0);
+  return dec(employee.baseSalary).greaterThan(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,19 +412,28 @@ export function calculatePayroll(
 
   const rateDaily = dailyRate(employee, settings);
   const rateHourly = hourlyRate(employee, settings);
+  // Named separately from the rates because they are what the UI shows and what
+  // the deduction policies price against: 18,000 / 30 = 600 a day, 600 / 8 = 75
+  // an hour. For hourly staff they are the stored rate and its standard day.
+  const dailyBase = rateDaily;
+  const hourlyBase = rateHourly;
 
   // --- 2. base salary ---------------------------------------------------------
   let baseSalary: Decimal;
   switch (employee.employmentType) {
     case EmploymentType.DAILY:
-      // New pay profiles define DAILY staff as minute-precise hourly pay. The
-      // legacy daily-rate fallback remains only for historical snapshots/tests.
-      baseSalary = employee.payType === 'HOURLY'
-        ? money(rateHourly.times(exactWorkingHours))
-        : money(rateDaily.times(attendance.presentDays));
-      break;
     case EmploymentType.HOURLY:
-      baseSalary = money(rateHourly.times(exactWorkingHours));
+      // Per-day earnings are authoritative when supplied: each day was already
+      // priced at the rate in force on that date, so a mid-month rise does not
+      // reprice the days before it. Falling back to one flat rate for the whole
+      // month is the legacy path, kept for historical snapshots and tests.
+      if (input.dailyEarnings) {
+        baseSalary = money(dec(input.dailyEarnings.amount));
+      } else if (employee.payType === 'HOURLY' || employee.employmentType === EmploymentType.HOURLY) {
+        baseSalary = money(rateHourly.times(exactWorkingHours));
+      } else {
+        baseSalary = money(rateDaily.times(attendance.presentDays));
+      }
       break;
     default: {
       baseSalary = money(employee.payType === 'MONTHLY' && employee.monthlySalary != null
@@ -367,44 +493,37 @@ export function calculatePayroll(
   );
 
   // --- 5. late deduction ------------------------------------------------------
-  // Company policy charges lateness in whole-hour blocks: any positive lateness
-  // inside the first hour costs one hour, 61 minutes costs two. The chargeable
-  // hours are kept alongside the raw minutes so a payslip can be audited
-  // against the attendance record.
-  let lateDeduction = new Decimal(0);
-  const lateMode = settings.string('LATE_DEDUCTION_MODE').toUpperCase();
-  // Rounding up to whole hours refines how time-based lateness is priced, so it
-  // applies to the PER_MINUTE path only. An installation that deliberately
-  // chose PER_OCCURRENCE is charging per incident, not per elapsed minute, and
-  // must keep doing so.
-  const roundUpHours =
-    settings.boolean('LATE_DEDUCTION_ROUND_UP_HOURS') && lateMode !== 'PER_OCCURRENCE';
-  const chargeableLateHours = roundUpHours ? lateDeductionHours(attendance.lateMinutes) : 0;
+  // Priced by the shared deduction module, which the per-day attendance
+  // valuation also calls. One formula, two callers - so the money a user sees
+  // on the Attendance page and the deduction on their payslip cannot diverge.
+  const policy = employee.policy ?? null;
+  const lateCharge = priceLateDeduction(policy, settings, {
+    lateMinutes: attendance.lateMinutes,
+    roundedLateMinutes: attendance.roundedLateMinutes,
+    lateCount: attendance.lateCount,
+    hourlyBase,
+    hourlyRate: rateHourly,
+  });
+  const lateDeduction = lateCharge.amount;
+  const lateChargedHours = lateCharge.chargedHours;
 
-  if (roundUpHours && chargeableLateHours > 0) {
-    lateDeduction = money(rateHourly.times(chargeableLateHours));
-  } else if (lateMode === 'PER_MINUTE' && attendance.lateMinutes > 0) {
-    if (settings.boolean('LATE_DEDUCTION_USE_HOURLY_RATE')) {
-      lateDeduction = money(rateHourly.dividedBy(60).times(attendance.lateMinutes));
-    } else {
-      lateDeduction = money(settings.decimal('LATE_DEDUCTION_AMOUNT').times(attendance.lateMinutes));
-    }
-  } else if (lateMode === 'PER_OCCURRENCE' && attendance.lateCount > 0) {
-    lateDeduction = money(settings.decimal('LATE_DEDUCTION_AMOUNT').times(attendance.lateCount));
-  }
+  // --- 6. leave and absence ---------------------------------------------------
+  // Leave and absence are two different facts priced by two different employee
+  // policies. Approved paid leave is never an absence, so only leave the record
+  // itself marks unpaid can be charged at all.
+  const absentDays = dec(attendance.absentDays);
+  const chargeableLeaveDays = dec(attendance.unpaidLeaveDays);
 
-  // --- 6. absence deduction ---------------------------------------------------
-  // Unpaid leave is deducted on the same basis as an unexcused absence.
-  const deductibleDays = dec(attendance.absentDays).plus(dec(attendance.unpaidLeaveDays));
-  let absenceDeduction = new Decimal(0);
-  const absenceMode = settings.string('ABSENCE_DEDUCTION_MODE').toUpperCase();
-  if (deductibleDays.greaterThan(0)) {
-    if (absenceMode === 'DAILY_RATE') {
-      absenceDeduction = money(rateDaily.times(deductibleDays));
-    } else if (absenceMode === 'FIXED') {
-      absenceDeduction = money(settings.decimal('ABSENCE_DEDUCTION_AMOUNT').times(deductibleDays));
-    }
-  }
+  const leaveDeduction = priceLeaveDeduction(policy, settings, {
+    days: chargeableLeaveDays,
+    dailyBase,
+    dailyRate: rateDaily,
+  });
+  const absenceDeduction = priceAbsenceDeduction(policy, settings, {
+    days: absentDays,
+    dailyBase,
+    dailyRate: rateDaily,
+  });
 
   // --- 7. statutory deductions ------------------------------------------------
   // The company enters social security and withholding tax by hand for now, so
@@ -416,16 +535,29 @@ export function calculatePayroll(
   const manualSocialSecurity = sumByKind(manualDeductions, PayrollItemKind.SOCIAL_SECURITY);
   const manualTax = sumByKind(manualDeductions, PayrollItemKind.TAX);
 
+  // Order of authority: a manual line on this payroll row, then the fixed
+  // amount configured on the employee, then the company formula. A configured
+  // 0 is a decision to deduct nothing and is honoured as such - only an absent
+  // (null) value falls through to the formula.
+  const policySso = policy?.socialSecurityAmount;
+  const policyTax = policy?.taxAmount;
+
   const socialSecurity = manualSocialSecurity.greaterThan(0)
     ? money(manualSocialSecurity)
-    : employee.ssoEnabled
-      ? calculateSocialSecurity(grossIncome, settings)
-      : new Decimal(0);
+    : policySso !== null && policySso !== undefined
+      ? money(dec(policySso))
+      : employee.ssoEnabled
+        ? calculateSocialSecurity(grossIncome, settings)
+        : new Decimal(0);
 
-  const taxableGross = money(grossIncome.minus(lateDeduction).minus(absenceDeduction));
+  const taxableGross = money(
+    grossIncome.minus(lateDeduction).minus(leaveDeduction).minus(absenceDeduction)
+  );
   const tax = manualTax.greaterThan(0)
     ? money(manualTax)
-    : calculateTax(taxableGross, socialSecurity, settings, employee.taxEnabled);
+    : policyTax !== null && policyTax !== undefined
+      ? money(dec(policyTax))
+      : calculateTax(taxableGross, socialSecurity, settings, employee.taxEnabled);
 
   // --- 8. manual deduction lines ---------------------------------------------
   const loanDeduction = money(sumByKind(manualDeductions, PayrollItemKind.LOAN));
@@ -433,6 +565,7 @@ export function calculatePayroll(
 
   const totalDeduction = money(
     lateDeduction
+      .plus(leaveDeduction)
       .plus(absenceDeduction)
       .plus(socialSecurity)
       .plus(tax)
@@ -499,21 +632,38 @@ export function calculatePayroll(
 
   const deductions: CalculatedLine[] = [];
   if (lateDeduction.greaterThan(0)) {
+    // The label carries the observed minutes and, when the charge is priced in
+    // whole-hour blocks, the number of blocks actually billed - so the payslip
+    // explains why 10 minutes late cost an hour.
+    const lateLabel =
+      lateChargedHours > 0
+        ? `หักมาสาย (${attendance.lateMinutes} นาที · คิด ${lateChargedHours} ชั่วโมง)`
+        : `หักมาสาย (${attendance.lateMinutes} นาที)`;
     deductions.push({
       kind: PayrollItemKind.LATE,
-      label: `หักมาสาย (${attendance.lateMinutes} นาที)`,
+      label: lateLabel,
       quantity: dec(attendance.lateMinutes),
-      rate: null,
+      rate: lateChargedHours > 0 ? hourlyBase : null,
       amount: lateDeduction,
+      isManual: false,
+    });
+  }
+  if (leaveDeduction.greaterThan(0)) {
+    deductions.push({
+      kind: PayrollItemKind.LEAVE,
+      label: `หักลา (${chargeableLeaveDays.toFixed(2)} วัน)`,
+      quantity: chargeableLeaveDays,
+      rate: dailyBase,
+      amount: leaveDeduction,
       isManual: false,
     });
   }
   if (absenceDeduction.greaterThan(0)) {
     deductions.push({
       kind: PayrollItemKind.ABSENCE,
-      label: `หักขาดงาน (${deductibleDays.toFixed(2)} วัน)`,
-      quantity: deductibleDays,
-      rate: rateDaily,
+      label: `หักขาดงาน (${absentDays.toFixed(2)} วัน)`,
+      quantity: absentDays,
+      rate: dailyBase,
       amount: absenceDeduction,
       isManual: false,
     });
@@ -549,44 +699,33 @@ export function calculatePayroll(
     });
   }
 
-  // --- 11. review status ------------------------------------------------------
-  let status: PayrollEmployeeStatus = PayrollEmployeeStatus.READY;
-
-  // Incomplete attendance is never silently treated as a normal day - it is
-  // surfaced so a human decides, because guessing would misstate someone's pay.
-  if ((employee.attendanceRequired ?? true) && attendance.missingDataDays > 0) {
-    status = PayrollEmployeeStatus.MISSING_DATA;
-    const parts: string[] = [];
-    if (attendance.missingCheckInDays > 0) parts.push(`ไม่มีเวลาเข้า ${attendance.missingCheckInDays} วัน`);
-    if (attendance.missingCheckOutDays > 0) parts.push(`ไม่มีเวลาออก ${attendance.missingCheckOutDays} วัน`);
-    reviewNotes.push(
-      `มีข้อมูลเข้า-ออกไม่ครบ ${attendance.missingDataDays} วัน` +
-        (parts.length > 0 ? ` (${parts.join(', ')})` : '')
-    );
-  } else if ((employee.attendanceRequired ?? true) && attendance.presentDays === 0 && attendance.workingDays > 0) {
-    status = PayrollEmployeeStatus.MISSING_DATA;
-    reviewNotes.push('ไม่พบข้อมูลการลงเวลาในรอบนี้');
-  }
-
-  if (status === PayrollEmployeeStatus.READY) {
-    if (netSalary.lessThan(0)) {
-      status = PayrollEmployeeStatus.NEEDS_REVIEW;
-      reviewNotes.push('เงินสุทธิติดลบ กรุณาตรวจสอบรายการหัก');
-    } else if (attendance.absentDays > 0) {
-      status = PayrollEmployeeStatus.NEEDS_REVIEW;
-      reviewNotes.push(`ขาดงาน ${attendance.absentDays} วัน`);
-    } else if (employee.employmentType === EmploymentType.DAILY &&
-      (!employee.payType || dec(employee.hourlyRate ?? 0).lessThanOrEqualTo(0)) &&
-      dec(employee.baseSalary).lessThanOrEqualTo(0)) {
-      status = PayrollEmployeeStatus.NEEDS_REVIEW;
-      reviewNotes.push('ยังไม่ได้กำหนดค่าจ้างพนักงานรายวัน — ยังไม่รวมค่าจ้างในยอดเงิน');
-    } else if ((employee.payType === 'MONTHLY' && dec(employee.monthlySalary ?? 0).lessThanOrEqualTo(0)) ||
-      (employee.payType === 'HOURLY' && dec(employee.hourlyRate ?? 0).lessThanOrEqualTo(0)) ||
-      (!employee.payType && dec(employee.baseSalary).lessThanOrEqualTo(0))) {
-      status = PayrollEmployeeStatus.NEEDS_REVIEW;
-      reviewNotes.push('ยังไม่ได้กำหนดเงินเดือนพื้นฐาน');
-    }
-  }
+  // --- 11. readiness status ----------------------------------------------------
+  // Resolved by the shared readiness module, on the same inputs the pre-payroll
+  // check uses, so the readiness screen and the calculated row always agree.
+  const attendanceRequired = employee.attendanceRequired ?? true;
+  // The period loader knows whether a rate covers this period and passes the
+  // answer in. When the calculator is driven directly it works the answer out
+  // from the rate inputs it was given, so a standalone call cannot accidentally
+  // report an employee with no wage as ready to be paid.
+  const payConfigured = employee.payConfigured ?? hasUsableRate(employee);
+  const unratedDays = input.dailyEarnings?.unratedDays ?? 0;
+  const readiness = resolveReadiness({
+    employmentType: employee.employmentType,
+    excluded: Boolean(employee.excluded),
+    payConfigured,
+    attendanceRequired,
+    missingDataDays: attendance.missingDataDays,
+    missingCheckInDays: attendance.missingCheckInDays,
+    missingCheckOutDays: attendance.missingCheckOutDays,
+    presentDays: attendance.presentDays,
+    workingDays: attendance.workingDays,
+    absentDays: attendance.absentDays,
+    unratedDays,
+    netNegative: netSalary.lessThan(0),
+    isEstimate: Boolean(input.isEstimate),
+  });
+  const status = readiness.status;
+  reviewNotes.push(...readiness.reasons);
 
   return {
     workingHours,
@@ -597,6 +736,15 @@ export function calculatePayroll(
     otHolidayHours,
     hourlyRate: rateHourly,
     dailyRate: rateDaily,
+    dailyBase,
+    hourlyBase,
+    breakDeductionMinutes: input.dailyEarnings?.totalBreakDeductionMinutes ?? 0,
+    payableMinutes: input.dailyEarnings?.totalPayableMinutes ?? 0,
+    roundedAwayMinutes: input.dailyEarnings?.totalRoundedAwayMinutes ?? 0,
+    roundedLateMinutes: attendance.roundedLateMinutes,
+    earlyLeaveMinutes: attendance.earlyLeaveMinutes,
+    roundedEarlyLeaveMinutes: attendance.roundedEarlyLeaveMinutes,
+    actualOtMinutes: attendance.actualOtMinutes,
     baseSalary,
     otAmount,
     allowanceAmount,
@@ -605,7 +753,8 @@ export function calculatePayroll(
     otherIncome,
     grossIncome,
     lateDeduction,
-    lateDeductionHours: chargeableLateHours,
+    lateDeductionHours: lateChargedHours,
+    leaveDeduction,
     absenceDeduction,
     socialSecurity,
     tax,
@@ -617,5 +766,7 @@ export function calculatePayroll(
     deductions,
     status,
     reviewNotes,
+    payConfigured,
+    isEstimate: Boolean(input.isEstimate) || unratedDays > 0 || !payConfigured,
   };
 }

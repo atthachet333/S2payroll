@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { reportQuerySchema, reportTypeSchema } from '../schemas/index.js';
 import { buildReport, toCsv, toExcel, type ReportType } from '../services/report.service.js';
+import { toReportPdf } from '../services/report-pdf.service.js';
 import { dayjs } from '../utils/datetime.js';
 
 export default async function reportRoutes(app: FastifyInstance): Promise<void> {
@@ -16,6 +17,8 @@ export default async function reportRoutes(app: FastifyInstance): Promise<void> 
       periodId: query.periodId,
       departmentId: query.departmentId,
       employeeId: query.employeeId,
+      employmentType: query.employmentType,
+      status: query.status,
       from: query.from ? dayjs.utc(query.from).startOf('day').toDate() : undefined,
       to: query.to ? dayjs.utc(query.to).startOf('day').toDate() : undefined,
     });
@@ -37,6 +40,14 @@ export default async function reportRoutes(app: FastifyInstance): Promise<void> 
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
         .header('Content-Disposition', `attachment; filename="${type}-${stamp}.xlsx"`)
+        .send(buffer);
+    }
+
+    if (query.format === 'pdf') {
+      const buffer = await toReportPdf(report);
+      return reply
+        .header('Content-Type', 'application/pdf')
+        .header('Content-Disposition', `attachment; filename="${type}-${stamp}.pdf"`)
         .send(buffer);
     }
 

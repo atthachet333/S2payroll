@@ -62,9 +62,14 @@ describe('current-day payroll readiness', () => {
     expect(text).toContain('Decimal');
   });
 
-  it('allows warning-only preview but opens the modal for blockers', () => {
+  it('calculates straight through only when the whole roster is ready', () => {
+    // Calculation is employee-scoped now, so the readiness dialog is a briefing
+    // rather than a gate. It still opens first whenever anyone is not ready, so
+    // the operator sees who will be marked incomplete before committing.
     const text = source('frontend/src/pages/PayrollDetailPage.tsx');
-    expect(text).toContain('if (report.canCalculate)');
+    expect(text).toContain(
+      'if (report.canCalculate && report.readiness.ready === report.readiness.employees)'
+    );
     expect(text).toContain("actionMutation.mutate('calculate')");
     expect(text).toContain('setPreCheckOpen(true)');
   });

@@ -27,6 +27,14 @@ export const notFound = (entity: string) =>
 export const conflict = (message: string, details?: unknown) =>
   new AppError(409, 'CONFLICT', message, details);
 
+/**
+ * A conflict that the caller is expected to branch on, carrying its own code
+ * rather than the generic CONFLICT. Matching on a message string is brittle -
+ * it breaks the moment the wording is improved or translated.
+ */
+export const codedConflict = (code: string, message: string, details?: unknown) =>
+  new AppError(409, code, message, details);
+
 export const unprocessable = (message: string, details?: unknown) =>
   new AppError(422, 'UNPROCESSABLE', message, details);
 

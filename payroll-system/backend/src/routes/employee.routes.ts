@@ -5,9 +5,15 @@ import {
   employeeQuerySchema,
   updateEmployeeSchema,
   payProfileSchema,
+  employeePayrollPolicySchema,
+  reactivateEmployeeSchema,
+  manualAttendanceSchema,
 } from '../schemas/index.js';
 import * as employeeService from '../services/employee.service.js';
+import * as attendanceService from '../services/attendance.service.js';
 import * as payProfileService from '../services/pay-profile.service.js';
+import * as payrollPolicyService from '../services/employee-payroll-policy.service.js';
+import { employeeDailyEarnings } from '../services/daily-earnings.service.js';
 import { getActor } from '../middleware/actor.js';
 import { dayjs } from '../utils/datetime.js';
 
@@ -78,6 +84,48 @@ export default async function employeeRoutes(app: FastifyInstance): Promise<void
     }
   );
 
+  // Per-employee payroll policy. Employee Edit and Payroll Settings both write
+  // here, so the two screens can never hold different numbers for one person.
+  app.get(
+    '/:id/payroll-policy',
+    { preHandler: [app.requirePermission('employee:read')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      return reply.send(await payrollPolicyService.getPayrollPolicy(id));
+    }
+  );
+
+  app.put(
+    '/:id/payroll-policy',
+    { preHandler: [app.requirePermission('employee:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = employeePayrollPolicySchema.parse(request.body);
+      return reply.send(
+        await payrollPolicyService.upsertPayrollPolicy(id, body, getActor(request))
+      );
+    }
+  );
+
+  // Per-day earnings for staff paid by the hour: what each day was worth at the
+  // rate in force on that date.
+  app.get(
+    '/:id/daily-earnings',
+    { preHandler: [app.requirePermission('employee:read')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const query = request.query as { year?: string; month?: string };
+      const now = dayjs();
+      return reply.send(
+        await employeeDailyEarnings(
+          id,
+          Number(query.year ?? now.year()),
+          Number(query.month ?? now.month() + 1)
+        )
+      );
+    }
+  );
+
   app.post(
     '/:id/pay-profiles',
     { preHandler: [app.requirePermission('employee:write')] },
@@ -110,6 +158,50 @@ export default async function employeeRoutes(app: FastifyInstance): Promise<void
       const { id } = request.params as { id: string };
       const body = updateEmployeeSchema.parse(request.body);
       return reply.send(await employeeService.updateEmployee(id, body, getActor(request)));
+    }
+  );
+
+  /** Bring a deactivated or terminated employee back onto the payroll. */
+  app.post(
+    '/:id/reactivate',
+    { preHandler: [app.requirePermission('employee:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = reactivateEmployeeSchema.parse(request.body);
+      return reply.send(
+        await employeeService.reactivateEmployee(
+          id,
+          { returnDate: body.returnDate, reason: body.reason ?? null },
+          getActor(request)
+        )
+      );
+    }
+  );
+
+  /**
+   * Create one attendance day by hand. Derived values are computed by the
+   * backend from the punches; nothing is written to Google Sheets.
+   */
+  app.post(
+    '/:id/attendance',
+    { preHandler: [app.requirePermission('attendance:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = manualAttendanceSchema.parse(request.body);
+      const actor = getActor(request);
+      return reply.status(201).send(
+        await attendanceService.createManualAttendance(
+          id,
+          {
+            workDate: body.workDate,
+            checkIn: body.checkIn ?? null,
+            checkOut: body.checkOut ?? null,
+            reason: body.reason,
+            note: body.note ?? null,
+          },
+          { userId: actor.userId, email: actor.email, ip: actor.ip, userAgent: actor.userAgent }
+        )
+      );
     }
   );
 

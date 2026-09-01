@@ -9,7 +9,10 @@ describe('payroll UX and effective-dated configuration', () => {
   it('calculates immediately only after an automatic successful pre-check', () => {
     const page = read('frontend/src/pages/PayrollDetailPage.tsx');
     expect(page).toContain('const report = await payrollApi.preCheck(periodId)');
-    expect(page).toContain("if (report.canCalculate)");
+    // The dialog opens whenever anyone is not ready, not only on a blocker.
+    expect(page).toContain(
+      'if (report.canCalculate && report.readiness.ready === report.readiness.employees)'
+    );
     expect(page).toContain("actionMutation.mutate('calculate')");
     expect(page).toContain('setPreCheckOpen(true)');
   });

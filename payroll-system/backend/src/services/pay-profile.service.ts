@@ -68,9 +68,39 @@ export async function activePayProfile(employeeId: string, effectiveDate: Date) 
   });
 }
 
+/**
+ * A wage rate has to be a positive amount of money.
+ *
+ * This used to reject any DAILY rate outside a fixed 60/75/93/100 whitelist.
+ * That was too strong: the company negotiates rates that are not on the list -
+ * 62, 82.50, 120 - and a validator that refuses them makes the system unable to
+ * describe real employment terms. The four familiar values are now presets the
+ * form offers for convenience, not the set of permissible wages.
+ *
+ * What remains enforced is what actually protects a payslip: the amount must be
+ * a real, positive, two-decimal money value. A rate of 0 or a negative one is
+ * not a cheaper wage, it is the absence of a wage, and the readiness screen
+ * already has a word for that.
+ */
+function assertUsableRate(data: { payType: PayType; monthlySalary: Prisma.Decimal | null; hourlyRate: Prisma.Decimal | null }) {
+  const amount = data.payType === PayType.HOURLY ? data.hourlyRate : data.monthlySalary;
+  const label = data.payType === PayType.HOURLY ? 'อัตราค่าจ้างต่อชั่วโมง' : 'เงินเดือน';
+
+  if (amount === null) throw badRequest(`กรุณาระบุ${label}`);
+  if (!amount.isFinite() || amount.lessThanOrEqualTo(0)) {
+    throw badRequest(`${label}ต้องมากกว่า 0`);
+  }
+  // Money is stored at two decimal places; a third would be silently rounded
+  // away on write, so the operator is told rather than quietly corrected.
+  if (amount.decimalPlaces() > 2) {
+    throw badRequest(`${label}ต้องมีทศนิยมไม่เกิน 2 ตำแหน่ง`);
+  }
+}
+
 export async function createPayProfile(employeeId: string, input: PayProfileInput, actor: Actor) {
   if (!(await prisma.employee.count({ where: { id: employeeId } }))) throw notFound('Employee');
   const data = normalize(input);
+  assertUsableRate(data);
   if (data.effectiveTo && data.effectiveTo < data.effectiveFrom) {
     throw badRequest('วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่มใช้');
   }

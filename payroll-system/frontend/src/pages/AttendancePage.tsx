@@ -32,6 +32,7 @@ import {
   TabsTrigger,
   Textarea,
 } from '@/components/ui';
+import DailyPayCell from '@/features/attendance/DailyPayCell';
 import { AttendanceStatusBadge } from '@/components/StatusBadge';
 import { formatDate, formatDateTime, formatDateWithWeekday, formatMinutes, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
 import type { AttendanceRecord, AttendanceSummary } from '@/types';
@@ -258,7 +259,7 @@ export default function AttendancePage() {
 
           <Card className="overflow-hidden">
             {query.isLoading ? (
-              <TableSkeleton rows={8} cols={8} />
+              <TableSkeleton rows={8} cols={12} />
             ) : query.isError ? (
               <ErrorState
                 message={apiErrorMessage(query.error)}
@@ -285,6 +286,7 @@ export default function AttendancePage() {
                       <col className="w-[110px]" />
                       <col className="w-[100px]" />
                       <col className="w-[110px]" />
+                      <col className="w-[110px]" />
                       <col className="w-[56px]" />
                     </colgroup>
                     <thead>
@@ -299,6 +301,7 @@ export default function AttendancePage() {
                         <th className="text-right">OT</th>
                         <th className="text-right">สาย</th>
                         <th>สถานะ</th>
+                        <th className="text-right">ได้เงินวันนี้</th>
                         <th className="text-center"><span className="sr-only">จัดการ</span></th>
                       </tr>
                     </thead>
@@ -340,6 +343,9 @@ export default function AttendancePage() {
                               )}
                               {record.isLocked && <Badge variant="secondary">ล็อก</Badge>}
                             </div>
+                          </td>
+                          <td className="num">
+                            <DailyPayCell dailyPay={record.dailyPay} />
                           </td>
                           <td className="text-center">
                             {can('attendance:write') && !record.isLocked && (

@@ -119,8 +119,9 @@ export default async function registerRoutes(app: FastifyInstance): Promise<void
     '/api/overview',
     { preHandler: [app.requirePermission('payroll:read')] },
     async (request, reply) => {
-      const { periodId } = request.query as { periodId?: string };
-      return reply.send(await getOverview(periodId));
+      const { periodId, months } = request.query as { periodId?: string; months?: string };
+      const trendMonths = [3, 6, 12].includes(Number(months)) ? Number(months) : 6;
+      return reply.send(await getOverview(periodId, trendMonths));
     }
   );
 

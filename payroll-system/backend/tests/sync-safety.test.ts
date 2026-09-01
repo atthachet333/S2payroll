@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backendRoot = path.join(here, '..');
-const read = (...p: string[]) => fs.readFileSync(path.join(backendRoot, ...p), 'utf8');
+const read = (...p: string[]) =>
+  fs.readFileSync(path.join(backendRoot, ...p), 'utf8').replace(/\r\n/g, '\n');
 
 const sheetsSource = read('src', 'services', 'google-sheets.service.ts');
 const leaveSheetsSource = read('src', 'services', 'leave-sync.service.ts');

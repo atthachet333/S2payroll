@@ -66,6 +66,9 @@ beforeAll(async () => {
   process.env.DATABASE_URL ||= 'mysql://test:test@localhost:3306/test';
   process.env.JWT_SECRET ||= 'test-access-secret-at-least-16-chars';
   process.env.JWT_REFRESH_SECRET ||= 'test-refresh-secret-at-least-16-chars';
+  // Do not inherit the deployment origin from backend/.env: this test boots a
+  // local app and explicitly verifies the local frontend contract.
+  process.env.CORS_ORIGIN = 'http://localhost:2233';
 
   const { buildApp } = await import('../src/app.js');
   app = await buildApp();

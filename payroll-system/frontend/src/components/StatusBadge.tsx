@@ -21,9 +21,72 @@ const ATTENDANCE: Record<AttendanceStatus, { label: string; tone: Tone }> = {
 
 const PAYROLL_EMPLOYEE: Record<PayrollEmployeeStatus, { label: string; tone: Tone }> = {
   READY: { label: 'พร้อมจ่าย', tone: 'success' },
+  PARTIAL: { label: 'คำนวณบางส่วน', tone: 'warning' },
+  UNCONFIGURED: { label: 'ยังไม่ได้กำหนดค่าจ้าง', tone: 'danger' },
+  ATTENDANCE_INCOMPLETE: { label: 'ข้อมูลเวลาไม่ครบ', tone: 'danger' },
+  // Legacy values, still carried by rows calculated before readiness became
+  // per-employee. Labelled as their successors so one period never shows two
+  // different words for the same situation.
   NEEDS_REVIEW: { label: 'ต้องตรวจสอบ', tone: 'warning' },
-  MISSING_DATA: { label: 'ข้อมูลไม่ครบ', tone: 'danger' },
-  EXCLUDED: { label: 'ไม่รวมในรอบนี้', tone: 'outline' },
+  MISSING_DATA: { label: 'ข้อมูลเวลาไม่ครบ', tone: 'danger' },
+  EXCLUDED: { label: 'ยกเว้น', tone: 'outline' },
+};
+
+/** Groups the payroll readiness screen sorts employees into. */
+export const PAYROLL_STATUS_GROUPS: {
+  key: PayrollEmployeeStatus[];
+  label: string;
+  tone: Tone;
+  hint: string;
+}[] = [
+  {
+    key: ['READY'],
+    label: 'พร้อมคำนวณ',
+    tone: 'success',
+    hint: 'ข้อมูลครบ คำนวณเป็นยอดสุทธิได้ทันที',
+  },
+  {
+    key: ['PARTIAL', 'NEEDS_REVIEW'],
+    label: 'คำนวณได้บางส่วน',
+    tone: 'warning',
+    hint: 'คำนวณจากข้อมูลที่ทราบได้ แต่ยังไม่ใช่ยอดสุดท้าย',
+  },
+  {
+    key: ['UNCONFIGURED'],
+    label: 'ยังไม่ได้กำหนดค่าจ้าง',
+    tone: 'danger',
+    hint: 'ระบบจะแสดงเวลาทำงานจริง แต่จะไม่สร้างตัวเลขค่าจ้างขึ้นเอง',
+  },
+  {
+    key: ['ATTENDANCE_INCOMPLETE', 'MISSING_DATA'],
+    label: 'ข้อมูลเวลาไม่ครบ',
+    tone: 'danger',
+    hint: 'มีวันที่ผ่านมาแล้วซึ่งขาดเวลาเข้าหรือเวลาออก ต้องแก้ไขก่อนจึงจะได้ยอดสุดท้าย',
+  },
+  {
+    key: ['EXCLUDED'],
+    label: 'ถูกยกเว้น',
+    tone: 'outline',
+    hint: 'ไม่อยู่ในการคำนวณเงินเดือนตามนโยบายบริษัท',
+  },
+];
+
+export const LATE_DEDUCTION_LABELS: Record<string, string> = {
+  NONE: 'ไม่หัก',
+  PER_HOUR_FROM_BASE: 'หักตามฐานเงินเดือนต่อชั่วโมง',
+  FIXED_AMOUNT: 'กำหนดจำนวนเงินเอง',
+};
+
+export const LEAVE_DEDUCTION_LABELS: Record<string, string> = {
+  NONE: 'ไม่หัก',
+  PER_DAY_FROM_BASE: 'หักตามฐานเงินเดือนต่อวัน',
+  FIXED_AMOUNT: 'กำหนดจำนวนเงินเอง',
+};
+
+export const ABSENCE_DEDUCTION_LABELS: Record<string, string> = {
+  NONE: 'ไม่หัก',
+  PER_DAY_FROM_BASE: 'หักตามฐานเงินเดือนต่อวัน',
+  FIXED_AMOUNT: 'กำหนดจำนวนเงินเอง',
 };
 
 export const PERIOD_STATUS: Record<PayrollPeriodStatus, { label: string; tone: Tone }> = {
@@ -36,12 +99,17 @@ export const PERIOD_STATUS: Record<PayrollPeriodStatus, { label: string; tone: T
   LOCKED: { label: 'ล็อกแล้ว', tone: 'secondary' },
 };
 
-const EMPLOYEE: Record<EmployeeStatus, { label: string; tone: Tone }> = {
+export const EMPLOYEE: Record<EmployeeStatus, { label: string; tone: Tone }> = {
   ACTIVE: { label: 'ทำงานอยู่', tone: 'success' },
   PROBATION: { label: 'ทดลองงาน', tone: 'info' },
   INACTIVE: { label: 'ไม่ทำงานแล้ว', tone: 'secondary' },
   TERMINATED: { label: 'พ้นสภาพ', tone: 'danger' },
 };
+
+/** Employment status in Thai, for places that need the word rather than a badge. */
+export const EMPLOYEE_STATUS_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(EMPLOYEE).map(([key, value]) => [key, value.label])
+);
 
 export const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
   MONTHLY: 'รายเดือน',

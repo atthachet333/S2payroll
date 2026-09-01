@@ -10,8 +10,9 @@ import {
   minutesSinceMidnight,
   toUtcDateOnly,
 } from '../utils/datetime.js';
-import { badRequest, notFound } from '../utils/errors.js';
+import { badRequest, codedConflict, notFound } from '../utils/errors.js';
 import { getDayType, isScheduledWorkday } from './schedule-policy.service.js';
+import { valueAttendanceRecords } from './attendance-valuation.service.js';
 
 export interface AttendanceMetrics {
   workedMinutes: number;
@@ -198,7 +199,12 @@ export function computeAttendanceMetrics(
   const standardMinutes = Math.round(settings.decimal('STANDARD_WORK_HOURS').times(60).toNumber());
 
   // Only subtract the break from a day long enough to have contained one.
-  const deductBreak = !isDaily || settings.boolean('DAILY_DEDUCT_BREAK');
+  //
+  // Never for DAILY staff. Their break is applied once, at payroll time, by the
+  // shared time-rounding helper; deducting it here as well would remove it
+  // twice, and would also overwrite the true observed duration that the record
+  // exists to preserve. DAILY_DEDUCT_BREAK is withdrawn and no longer read.
+  const deductBreak = !isDaily;
   const breakMinutes = deductBreak && rawMinutes > configuredBreak ? configuredBreak : 0;
   const workedMinutes = Math.max(0, rawMinutes - breakMinutes);
 
@@ -353,7 +359,40 @@ export async function listAttendance(params: AttendanceListParams) {
         ? 'IN_PROGRESS' as const
         : item.status,
   }));
-  return { items: effectiveItems, total, page: params.page, pageSize: params.pageSize };
+
+  // What each day was worth, valued on the server. The table never derives
+  // money itself - one formula, owned by the backend, keeps the Attendance
+  // figure and the payroll figure from drifting apart.
+  const valuations = await valueAttendanceRecords(
+    effectiveItems.map((item) => ({
+      id: item.id,
+      employeeId: item.employeeId,
+      workDate: item.workDate,
+      workedMinutes: item.workedMinutes,
+      lateMinutes: item.lateMinutes,
+      isAbsent: item.isAbsent,
+      isHoliday: item.isHoliday,
+      isWeekend: item.isWeekend,
+      status: item.status,
+    })),
+    new Map(
+      effectiveItems.map((item) => [
+        item.employeeId,
+        {
+          id: item.employeeId,
+          employmentType: item.employee.employmentType,
+          attendanceRequired: item.employee.attendanceRequired,
+        },
+      ])
+    )
+  );
+
+  return {
+    items: effectiveItems.map((item) => ({ ...item, dailyPay: valuations.get(item.id) ?? null })),
+    total,
+    page: params.page,
+    pageSize: params.pageSize,
+  };
 }
 
 export async function getAttendanceById(id: string) {
@@ -1102,4 +1141,208 @@ export async function recalculateRange(from: Date, to: Date, employeeId?: string
     updated += 1;
   }
   return { updated, skippedLocked: locked };
+}
+
+// ---------------------------------------------------------------------------
+// Manual creation
+// ---------------------------------------------------------------------------
+
+export interface ManualAttendanceInput {
+  workDate: string;
+  /** "HH:mm" or a full ISO timestamp. */
+  checkIn?: string | null;
+  checkOut?: string | null;
+  reason: string;
+  note?: string | null;
+}
+
+/** Turn "HH:mm" or an ISO timestamp into an instant on the given work date. */
+function parsePunchOnDate(value: string | null | undefined, workDate: Date): Date | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(value)) {
+    const [h = '0', m = '0', s = '0'] = value.split(':');
+    return dayjs.utc(workDate).startOf('day').hour(Number(h)).minute(Number(m)).second(Number(s)).toDate();
+  }
+  const parsed = dayjs.utc(value);
+  if (!parsed.isValid()) throw badRequest(`รูปแบบเวลาไม่ถูกต้อง: ${value}`);
+  return parsed.toDate();
+}
+
+/**
+ * Create one attendance day by hand, from the Employees page.
+ *
+ * HR supplies only the facts they actually observed - the date and the two
+ * punches. Everything derived (worked, late, OT, early leave, status) is
+ * computed here by the same engine the Google Sheet import uses, because asking
+ * a human to type a worked-minutes figure invites a number that disagrees with
+ * the punches printed beside it.
+ *
+ * The Google Sheet is never written to. If the day was previously suppressed,
+ * the suppression is lifted, since re-adding the day is a deliberate reversal
+ * of the earlier removal.
+ */
+export async function createManualAttendance(
+  employeeId: string,
+  input: ManualAttendanceInput,
+  actor: { userId: string; email: string; ip?: string | null; userAgent?: string | null }
+) {
+  const reason = (input.reason ?? '').trim();
+  if (reason.length < 3) throw badRequest('กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร');
+
+  const employee = await prisma.employee.findUnique({
+    where: { id: employeeId },
+    select: {
+      id: true, employeeCode: true, firstName: true, lastName: true,
+      employmentType: true, otEligible: true, status: true, startDate: true, endDate: true,
+    },
+  });
+  if (!employee) throw notFound('Employee');
+
+  const parsedDate = dayjs.utc(input.workDate).startOf('day');
+  if (!parsedDate.isValid()) throw badRequest('กรุณาระบุวันที่ให้ถูกต้อง');
+  const workDate = parsedDate.toDate();
+
+  const clock = companyClock();
+  if (formatDateOnly(workDate) > clock.date) {
+    throw badRequest('ไม่สามารถบันทึกเวลาทำงานล่วงหน้าในอนาคตได้');
+  }
+
+  // The date is checked against the employment period, never against the
+  // employee's status today. Someone who left last week may still need a day
+  // from the week before recording, and refusing that would leave real worked
+  // time permanently unpayable.
+  if (workDate < toUtcDateOnly(employee.startDate)) {
+    throw badRequest('วันที่ต้องไม่ก่อนวันเริ่มงานของพนักงาน');
+  }
+  if (employee.endDate && workDate > toUtcDateOnly(employee.endDate)) {
+    throw badRequest('วันที่เลือกอยู่นอกช่วงการทำงานของพนักงาน');
+  }
+  // A former employee with no recorded end date is the ambiguous case: there is
+  // no reliable boundary to check against, and inventing one would be worse
+  // than allowing the entry. The date is accepted - it is already constrained
+  // to be on or after the hire date and not in the future - and the mandatory
+  // reason plus the audit entry are what make the decision reviewable.
+
+  // A finalised payroll period has already been reviewed, approved or paid.
+  // Adding a day underneath one would change a settled figure without the
+  // payroll workflow ever noticing, so it is refused and the period is named.
+  const finalised = await prisma.payrollPeriod.findFirst({
+    where: {
+      startDate: { lte: workDate },
+      endDate: { gte: workDate },
+      status: { in: [...FINALISED_PERIOD_STATUSES] },
+    },
+    select: { name: true, status: true },
+  });
+  if (finalised) {
+    throw badRequest(
+      `วันที่นี้อยู่ในรอบเงินเดือน ${finalised.name} ซึ่งมีสถานะ ${finalised.status} แล้ว ไม่สามารถเพิ่มข้อมูลการลงเวลาได้`
+    );
+  }
+
+  // One effective record per employee per day. Creating a second would double
+  // count the day in every payroll aggregate.
+  const existing = await prisma.attendanceRecord.findUnique({
+    where: { employee_work_date: { employeeId, workDate } },
+    select: { id: true },
+  });
+  if (existing) {
+    throw codedConflict(
+      'ATTENDANCE_ALREADY_EXISTS',
+      'มีข้อมูลการลงเวลาของวันที่เลือกอยู่แล้ว',
+      { attendanceId: existing.id }
+    );
+  }
+
+  const checkIn = parsePunchOnDate(input.checkIn, workDate);
+  const checkOut = parsePunchOnDate(input.checkOut, workDate);
+  if (!checkIn && !checkOut) throw badRequest('กรุณาระบุเวลาเข้าหรือเวลาออกอย่างน้อยหนึ่งค่า');
+
+  const settings = await loadSettingsForDate(workDate);
+  const [holiday] = await prisma.holiday.findMany({ where: { date: workDate }, take: 1 });
+  const [leave] = await prisma.leaveRecord.findMany({
+    where: {
+      employeeId,
+      status: 'APPROVED',
+      startDate: { lte: workDate },
+      endDate: { gte: workDate },
+    },
+    take: 1,
+  });
+
+  const metrics = computeAttendanceMetrics(
+    {
+      workDate,
+      checkIn,
+      checkOut,
+      isHoliday: Boolean(holiday),
+      isWeekend: !isScheduledWorkday(workDate, settings),
+      isOnLeave: Boolean(leave),
+      otEligible: employee.otEligible,
+      employmentType: employee.employmentType,
+    },
+    settings
+  );
+
+  const record = await prisma.$transaction(async (tx) => {
+    // Re-adding a day the operator previously removed is a deliberate reversal,
+    // so the suppression that kept the sync from re-importing it is lifted.
+    await tx.attendanceSuppression.deleteMany({ where: { employeeId, workDate } });
+
+    return tx.attendanceRecord.create({
+      data: {
+        employeeId,
+        employeeCode: employee.employeeCode,
+        workDate,
+        checkIn,
+        checkOut,
+        // There is no imported original for a hand-authored day. The entered
+        // punches are recorded as the originals so a later correction has a
+        // real "before" to show rather than an empty one.
+        originalCheckIn: checkIn,
+        originalCheckOut: checkOut,
+        workedMinutes: metrics.workedMinutes,
+        normalMinutes: metrics.normalMinutes,
+        otMinutes: metrics.otMinutes,
+        breakMinutes: metrics.breakMinutes,
+        lateMinutes: metrics.lateMinutes,
+        earlyLeaveMinutes: metrics.earlyLeaveMinutes,
+        isMissingCheckIn: metrics.isMissingCheckIn,
+        isMissingCheckOut: metrics.isMissingCheckOut,
+        isAbsent: metrics.isAbsent,
+        isHoliday: Boolean(holiday),
+        isWeekend: !isScheduledWorkday(workDate, settings),
+        status: metrics.status,
+        source: 'MANUAL',
+        note: input.note ?? null,
+        createdBy: actor.userId,
+      },
+    });
+  });
+
+  const fmt = (d: Date | null) => (d ? dayjs.utc(d).format('YYYY-MM-DD HH:mm') : null);
+  await recordAudit({
+    action: 'ATTENDANCE_MANUAL_CREATE',
+    entity: 'AttendanceRecord',
+    entityId: record.id,
+    newValue: {
+      employeeCode: employee.employeeCode,
+      employeeName: `${employee.firstName} ${employee.lastName}`,
+      workDate: formatDateOnly(workDate),
+      checkIn: fmt(checkIn),
+      checkOut: fmt(checkOut),
+      workedMinutes: metrics.workedMinutes,
+      lateMinutes: metrics.lateMinutes,
+      otMinutes: metrics.otMinutes,
+      status: metrics.status,
+      source: 'MANUAL',
+    },
+    reason,
+    userId: actor.userId,
+    userEmail: actor.email,
+    ipAddress: actor.ip,
+    userAgent: actor.userAgent,
+  });
+
+  return record;
 }

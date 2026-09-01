@@ -45,20 +45,57 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config;
 });
 
+/**
+ * Infrastructure-level failures, translated for the people who actually read
+ * them. These carry a technically accurate message that means nothing to a
+ * payroll clerk - ROUTE_NOT_FOUND surfaced verbatim as
+ * "POST /api/employees/<id>/attendance not found" inside a save dialog, which
+ * reads as a broken app rather than as a server that needs redeploying.
+ */
+const INFRASTRUCTURE_MESSAGES: Record<string, string> = {
+  ROUTE_NOT_FOUND:
+    'เซิร์ฟเวอร์ยังไม่รองรับคำสั่งนี้ (เวอร์ชันบนเซิร์ฟเวอร์ยังไม่อัปเดต) กรุณาแจ้งผู้ดูแลระบบ',
+  INTERNAL_ERROR: 'เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง',
+};
+
 /** Extract the API's structured error message for display in a toast. */
 export function apiErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const data = error.response?.data as
-      | { error?: { message?: string; details?: { path: string; message: string }[] } }
+      | { error?: { code?: string; message?: string; details?: { path: string; message: string }[] } }
       | undefined;
     if (data?.error?.details?.length) {
       return data.error.details.map((d) => d.message).join(', ');
     }
+    const code = data?.error?.code;
+    if (code && INFRASTRUCTURE_MESSAGES[code]) return INFRASTRUCTURE_MESSAGES[code];
     if (data?.error?.message) return data.error.message;
     if (error.code === 'ERR_NETWORK') return 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้';
-    return error.message;
+    // An axios message such as "Request failed with status code 500" is not
+    // something to put in front of a user either.
+    return 'เกิดข้อผิดพลาดในการเชื่อมต่อเซิร์ฟเวอร์';
   }
   return error instanceof Error ? error.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+}
+
+/** The API's machine-readable error code, for branching on a specific failure. */
+export function apiErrorCode(error: unknown): string | null {
+  if (!axios.isAxiosError(error)) return null;
+  const data = error.response?.data as { error?: { code?: string } } | undefined;
+  return data?.error?.code ?? null;
+}
+
+/**
+ * The API's structured `details` payload, when there is one.
+ *
+ * Some errors carry a pointer rather than just prose - a duplicate attendance
+ * day, for instance, returns the id of the record that already exists so the UI
+ * can offer to open it instead of leaving the user to go and find it.
+ */
+export function apiErrorDetails(error: unknown): unknown {
+  if (!axios.isAxiosError(error)) return null;
+  const data = error.response?.data as { error?: { details?: unknown } } | undefined;
+  return data?.error?.details ?? null;
 }
 
 let onSessionExpired: (() => void) | null = null;

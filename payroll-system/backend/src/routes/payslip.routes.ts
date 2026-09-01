@@ -20,7 +20,7 @@ export default async function payslipRoutes(app: FastifyInstance): Promise<void>
   );
 
   /**
-   * Server-rendered A4 PDF. Every figure comes from the stored snapshot and is
+   * Server-rendered A5 PDF. Every figure comes from the stored snapshot and is
    * re-verified against the payroll row before rendering, so a client cannot
    * influence what the document says.
    */

@@ -4,21 +4,40 @@ import path from 'node:path';
 
 export default defineConfig({
   plugins: [react()],
+
   resolve: {
-    alias: { '@': path.resolve(__dirname, './src') },
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
   },
+
   server: {
+    host: '0.0.0.0',
     port: 2233,
     strictPort: true,
+    allowedHosts: [
+      'localhost',
+      '127.0.0.1',
+      'payroll.s2aconsultant.com',
+    ],
   },
-  preview: { port: 2233, strictPort: true },
+
+  preview: {
+    host: '0.0.0.0',
+    port: 2233,
+    strictPort: true,
+    allowedHosts: [
+      'localhost',
+      '127.0.0.1',
+      'payroll.s2aconsultant.com',
+    ],
+  },
+
   build: {
     outDir: 'dist',
     sourcemap: false,
     rollupOptions: {
       output: {
-        // Split the heavy, rarely-changing libraries so the app bundle stays
-        // small and cacheable across deploys.
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
           charts: ['recharts'],

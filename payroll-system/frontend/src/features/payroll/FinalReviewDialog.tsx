@@ -37,7 +37,25 @@ interface Problem {
 function buildProblems(summary: PeriodSummary, rows: PayrollEmployee[]): Problem[] {
   const problems: Problem[] = [];
 
-  const missing = rows.filter((r) => r.status === 'MISSING_DATA');
+  // Calculation is open to everyone, but approval is the moment the figures
+  // become real - so every row whose amount is not final blocks it, an unset
+  // wage rate just as much as a missing punch. MISSING_DATA is the legacy
+  // spelling of ATTENDANCE_INCOMPLETE and is grouped with it.
+  const unconfigured = rows.filter((r) => r.status === 'UNCONFIGURED');
+  if (unconfigured.length > 0) {
+    problems.push({
+      key: 'unconfigured',
+      severity: 'blocker',
+      icon: <AlertTriangle className="h-4 w-4" />,
+      title: `ยังไม่ได้กำหนดค่าจ้าง ${unconfigured.length} คน`,
+      detail: 'ยอดของพนักงานเหล่านี้ยังไม่ใช่ค่าจ้างจริง ต้องกำหนดอัตราก่อนอนุมัติ',
+      employees: unconfigured.map((r) => `${r.employeeCode} ${r.employeeName}`),
+    });
+  }
+
+  const missing = rows.filter(
+    (r) => r.status === 'ATTENDANCE_INCOMPLETE' || r.status === 'MISSING_DATA'
+  );
   if (missing.length > 0) {
     problems.push({
       key: 'missing',
@@ -49,14 +67,14 @@ function buildProblems(summary: PeriodSummary, rows: PayrollEmployee[]): Problem
     });
   }
 
-  const needsReview = rows.filter((r) => r.status === 'NEEDS_REVIEW');
+  const needsReview = rows.filter((r) => r.status === 'PARTIAL' || r.status === 'NEEDS_REVIEW');
   if (needsReview.length > 0) {
     problems.push({
       key: 'review',
       severity: 'warning',
       icon: <AlertTriangle className="h-4 w-4" />,
-      title: `ต้องตรวจสอบ ${needsReview.length} คน`,
-      detail: 'ส่วนใหญ่เกิดจากการขาดงานหรือเงินสุทธิผิดปกติ อนุมัติได้แต่ควรตรวจก่อน',
+      title: `คำนวณได้บางส่วน ${needsReview.length} คน`,
+      detail: 'ส่วนใหญ่เกิดจากการขาดงาน อัตราที่ครอบคลุมไม่ครบ หรือเงินสุทธิผิดปกติ อนุมัติได้แต่ควรตรวจก่อน',
       employees: needsReview.map((r) => `${r.employeeCode} ${r.employeeName}`),
     });
   }

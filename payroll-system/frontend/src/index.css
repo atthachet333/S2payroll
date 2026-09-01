@@ -110,48 +110,220 @@
 }
 
 /*
- * A4 print layout for payslips and reports.
+ * Paper print layout for payslips.
  * Everything outside .print-area is hidden, so the browser's "Save as PDF"
  * produces a clean single-document output with no application chrome.
  */
+/* The payslip is printed from #payslip-print-root, a copy mounted directly on
+   document.body by PayslipPrintPortal. It is invisible on screen. */
+#payslip-print-root {
+  display: none;
+}
+
+/*
+ * A5 portrait print layout for the payslip.
+ *
+ * Printing the dialog itself is not possible: the preview sits inside a Radix
+ * panel that is position:fixed, centred with translate(-50%, -50%) and clipped
+ * by max-height:92vh + overflow-y:auto. The transform makes that panel a
+ * containing block, so absolutely-positioned print rules resolved against the
+ * panel rather than the page - the payslip landed halfway down, got clipped,
+ * and the application DOM behind the modal kept paginating. Hence the separate
+ * root, which has no fixed, transformed or scrolling ancestor.
+ */
 @media print {
   @page {
-    size: A4;
-    margin: 12mm;
+    size: A5 portrait;
+    margin: 7mm;
   }
 
+  html,
   body {
-    background: #fff;
+    width: 148mm;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    /* The screen shell scrolls; paper does not. Leaving these set produced
+       clipped content and phantom pages. */
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
   }
 
-  .no-print {
+  /* Print only the payslip. Every other top-level subtree - the app shell, the
+     dialog, its overlay, any toast layer - is removed from the page box
+     entirely, so none of it can contribute a blank page. */
+  body > *:not(#payslip-print-root) {
     display: none !important;
   }
 
-  .print-area {
+  #payslip-print-root {
     display: block !important;
-    position: absolute;
-    inset: 0;
+    position: static !important;
+    width: 100%;
     margin: 0;
     padding: 0;
-    width: 100%;
   }
 
-  .print-page {
-    page-break-after: always;
-    break-after: page;
+  /* Nothing inside the printed copy may reintroduce modal positioning,
+     scrolling or a height cap. */
+  #payslip-print-root * {
+    position: static !important;
+    transform: none !important;
+    overflow: visible !important;
+    max-height: none !important;
     box-shadow: none !important;
-    border: none !important;
-    margin: 0 !important;
-    padding: 0 !important;
   }
 
-  .print-page:last-child {
-    page-break-after: auto;
-    break-after: auto;
+  /* The draft watermark is the one exception: it is positioned on purpose. */
+  #payslip-print-root [data-payslip-watermark] {
+    position: absolute !important;
+  }
+
+  #payslip-print-root .payslip-sheet {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    /* The screen copy carries p-8 for the dialog; on paper the @page margin
+       provides the gutter. A couple of millimetres of internal padding keeps
+       right-aligned text off the trim edge, which most printers cannot reach
+       anyway. */
+    padding: 0 2mm !important;
+    border: none !important;
+    /* A compact layout composed for A5, not a transformed screen preview. */
+    font-size: 7.5pt !important;
+    line-height: 1.2 !important;
+  }
+
+  #payslip-print-root .payslip-brand {
+    font-size: 10.5pt !important;
+  }
+
+  #payslip-print-root .payslip-title {
+    font-size: 13pt !important;
+  }
+
+  #payslip-print-root .payslip-net {
+    font-size: 14pt !important;
+  }
+
+  #payslip-print-root .payslip-header {
+    gap: 3mm !important;
+    padding-bottom: 2mm !important;
+  }
+
+  #payslip-print-root .payslip-logo {
+    width: 11mm !important;
+    height: 11mm !important;
+    border-radius: 9999px !important;
+    overflow: hidden !important;
+  }
+
+  #payslip-print-root .payslip-logo img {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover !important;
+  }
+
+  #payslip-print-root .payslip-employee {
+    margin-top: 2mm !important;
+    column-gap: 4mm !important;
+    row-gap: 0.6mm !important;
+    font-size: 7.5pt !important;
+  }
+
+  #payslip-print-root .payslip-employee > div > span:first-child {
+    width: 21mm !important;
+  }
+
+  #payslip-print-root .payslip-basis,
+  #payslip-print-root .payslip-attendance {
+    margin-top: 2mm !important;
+    gap: 1.5mm !important;
+    padding: 1.5mm 2mm !important;
+  }
+
+  #payslip-print-root .payslip-basis p:first-child,
+  #payslip-print-root .payslip-attendance p:first-child {
+    font-size: 6.5pt !important;
+  }
+
+  #payslip-print-root .payslip-basis p:last-child {
+    font-size: 8pt !important;
+  }
+
+  #payslip-print-root .payslip-lines {
+    margin-top: 2mm !important;
+    gap: 2mm !important;
+  }
+
+  #payslip-print-root .payslip-lines table,
+  #payslip-print-root .payslip-lines > div > div {
+    font-size: 7pt !important;
+  }
+
+  #payslip-print-root .payslip-lines td,
+  #payslip-print-root .payslip-lines > div > div {
+    padding: 1mm 1.5mm !important;
+  }
+
+  #payslip-print-root .payslip-net-band {
+    margin-top: 2.5mm !important;
+    padding: 2mm 3mm !important;
+  }
+
+  /* Signatures sit at the foot of the slip; the generous on-screen gap is what
+     tipped the layout onto a second page. */
+  #payslip-print-root .payslip-signatures {
+    margin-top: 5mm !important;
+    gap: 12mm !important;
+    font-size: 7pt !important;
+  }
+
+  #payslip-print-root .payslip-signatures > div > div {
+    padding-bottom: 5mm !important;
+  }
+
+  #payslip-print-root .payslip-footer {
+    margin-top: 3mm !important;
+    font-size: 6pt !important;
+  }
+
+  /* Backgrounds are dropped by default when printing. The navy net-pay band and
+     the tinted section headers are how the eye finds the figures, so they are
+     forced to print. */
+  #payslip-print-root,
+  #payslip-print-root * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .print-navy {
+    background: #1e3a8a !important;
+    color: #ffffff !important;
   }
 
   .print-border {
     border: 1px solid #cbd5e1 !important;
+  }
+
+  /* One payslip is one page: never split a block across a page boundary. */
+  #payslip-print-root table,
+  #payslip-print-root thead,
+  #payslip-print-root tfoot,
+  #payslip-print-root tr,
+  #payslip-print-root .payslip-signatures {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* A single slip must not emit a trailing blank page. */
+  #payslip-print-root .print-page {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .no-print {
+    display: none !important;
   }
 }

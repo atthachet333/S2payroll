@@ -22,6 +22,7 @@ import { dayjs, eachDay } from '../utils/datetime.js';
 import { badRequest, conflict, notFound } from '../utils/errors.js';
 import * as workScheduleService from '../services/work-schedule-profile.service.js';
 import * as payProfileService from '../services/pay-profile.service.js';
+import * as payrollPolicyService from '../services/employee-payroll-policy.service.js';
 
 export default async function settingsRoutes(app: FastifyInstance): Promise<void> {
   // --- payroll / attendance / OT rules ---------------------------------------
@@ -56,6 +57,22 @@ export default async function settingsRoutes(app: FastifyInstance): Promise<void
 
   app.get('/pay-configurations', { preHandler: [app.requirePermission('settings:read')] }, async (_request, reply) => {
     return reply.send(await payProfileService.listEmployeePayConfigurations());
+  });
+
+  /**
+   * Quick-pick hourly rates for the daily-rate form. Suggestions only - the API
+   * accepts any positive money amount - so this needs read access, not write.
+   */
+  app.get('/daily-rate-presets', { preHandler: [app.requirePermission('employee:read')] }, async (_request, reply) => {
+    const settings = await settingsService.loadSettings();
+    return reply.send({ presets: settingsService.dailyHourlyRatePresets(settings) });
+  });
+
+  // Per-employee payroll policies, for the employee-overrides table on the
+  // Payroll Settings page. Writes go through the employee endpoint, so there is
+  // one write path and one audit trail.
+  app.get('/payroll-policies', { preHandler: [app.requirePermission('settings:read')] }, async (_request, reply) => {
+    return reply.send(await payrollPolicyService.listEmployeePayrollPolicies());
   });
 
   // --- company ---------------------------------------------------------------

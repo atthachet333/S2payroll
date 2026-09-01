@@ -3,7 +3,7 @@ import { prisma } from '../plugins/prisma.js';
 import { recordAudit } from './audit.service.js';
 import { dec, toPrismaDecimal } from '../utils/money.js';
 import { dayjs } from '../utils/datetime.js';
-import { conflict, notFound } from '../utils/errors.js';
+import { badRequest, conflict, notFound } from '../utils/errors.js';
 import {
   completenessWhere,
   evaluateEmployeeProfileCompleteness,
@@ -11,6 +11,9 @@ import {
   type CompletenessFilter,
 } from './employee-completeness.service.js';
 import type { Actor } from './payroll.service.js';
+import { loadSettings } from './settings.service.js';
+import { floorToInterval, roundingIntervalMinutes } from '../utils/time-rounding.js';
+import { valueAttendanceRecords } from './attendance-valuation.service.js';
 
 export interface EmployeeListParams {
   /** Master-data completeness, evaluated by employee-completeness.service. */
@@ -271,6 +274,76 @@ export async function deactivateEmployee(id: string, reason: string, actor: Acto
   return employee;
 }
 
+export interface ReactivateInput {
+  /** The day the employee returns to work. Never defaulted silently. */
+  returnDate: string;
+  reason?: string | null;
+}
+
+/**
+ * Bring a deactivated or terminated employee back onto the payroll.
+ *
+ * Nothing about the previous departure is erased. start_date stays the original
+ * hire date, the audit entry carries the status and end date being replaced, and
+ * the return-to-work date is stored in reactivated_at so payroll measures the
+ * new spell of employment from it. Clearing end_date without recording where
+ * the new spell begins would make the returning employee eligible for every
+ * period they were away for, and recalculating one of those months would pay
+ * them for time they did not work.
+ */
+export async function reactivateEmployee(id: string, input: ReactivateInput, actor: Actor) {
+  const current = await prisma.employee.findUnique({ where: { id } });
+  if (!current) throw notFound('Employee');
+
+  if (current.status === EmployeeStatus.ACTIVE || current.status === EmployeeStatus.PROBATION) {
+    throw badRequest('พนักงานคนนี้ทำงานอยู่แล้ว');
+  }
+
+  const returnDate = dayjs.utc(input.returnDate).startOf('day');
+  if (!returnDate.isValid()) throw badRequest('กรุณาระบุวันที่กลับมาทำงานให้ถูกต้อง');
+  if (returnDate.toDate() < current.startDate) {
+    throw badRequest('วันที่กลับมาทำงานต้องไม่ก่อนวันที่เริ่มงานเดิม');
+  }
+
+  const employee = await prisma.employee.update({
+    where: { id },
+    data: {
+      status: EmployeeStatus.ACTIVE,
+      // The employment no longer has a scheduled end; reactivatedAt is what
+      // now marks where the current spell starts.
+      endDate: null,
+      reactivatedAt: returnDate.toDate(),
+    },
+    include: employeeInclude,
+  });
+
+  await recordAudit({
+    action: 'EMPLOYEE_REACTIVATE',
+    entity: 'Employee',
+    entityId: id,
+    oldValue: {
+      status: current.status,
+      endDate: current.endDate ? dayjs.utc(current.endDate).format('YYYY-MM-DD') : null,
+      reactivatedAt: current.reactivatedAt
+        ? dayjs.utc(current.reactivatedAt).format('YYYY-MM-DD')
+        : null,
+    },
+    newValue: {
+      status: EmployeeStatus.ACTIVE,
+      endDate: null,
+      reactivatedAt: returnDate.format('YYYY-MM-DD'),
+      originalStartDate: dayjs.utc(current.startDate).format('YYYY-MM-DD'),
+    },
+    reason: input.reason ?? null,
+    userId: actor.userId,
+    userEmail: actor.email,
+    ipAddress: actor.ip,
+    userAgent: actor.userAgent,
+  });
+
+  return employee;
+}
+
 /** Attendance totals and payslip history shown on the employee detail page. */
 export async function employeeSummary(id: string, from?: Date, to?: Date) {
   const employee = await getEmployee(id);
@@ -306,6 +379,18 @@ export async function employeeSummary(id: string, from?: Date, to?: Date) {
   const statusCounts: Record<string, number> = {};
   for (const row of grouped) statusCounts[row.status] = row._count._all;
 
+  // The observed totals above are what happened; these are what the company
+  // rounding policy would charge from. Both are returned so the employee page
+  // can show the pair rather than leaving HR to work out the difference.
+  const settings = await loadSettings();
+  const interval = roundingIntervalMinutes(settings);
+  const perDay = await prisma.attendanceRecord.findMany({
+    where,
+    select: { lateMinutes: true, earlyLeaveMinutes: true, otMinutes: true, workedMinutes: true },
+  });
+  const sumRounded = (pick: (r: (typeof perDay)[number]) => number) =>
+    perDay.reduce((total, row) => total + floorToInterval(pick(row), interval), 0);
+
   return {
     employee,
     attendance: {
@@ -313,6 +398,14 @@ export async function employeeSummary(id: string, from?: Date, to?: Date) {
       workedMinutes: aggregate._sum.workedMinutes ?? 0,
       otMinutes: aggregate._sum.otMinutes ?? 0,
       lateMinutes: aggregate._sum.lateMinutes ?? 0,
+      // Floored per day and summed, matching how payroll aggregates them, so
+      // this page and the payroll run cannot state different figures.
+      roundedLateMinutes: sumRounded((r) => r.lateMinutes),
+      earlyLeaveMinutes: perDay.reduce((n, r) => n + r.earlyLeaveMinutes, 0),
+      roundedEarlyLeaveMinutes: sumRounded((r) => r.earlyLeaveMinutes),
+      roundedOtMinutes: sumRounded((r) => r.otMinutes),
+      presentDays: perDay.filter((r) => r.workedMinutes > 0).length,
+      roundingIntervalMinutes: interval,
       statusCounts,
     },
     payslips,
@@ -339,11 +432,39 @@ export async function employeeAttendanceHistory(
   const [items, total] = await Promise.all([
     prisma.attendanceRecord.findMany({
       where, orderBy: { workDate: 'desc' }, skip: (page - 1) * pageSize, take: pageSize,
-      include: { employee: { select: { firstName: true, lastName: true, employmentType: true } } },
+      include: { employee: { select: { firstName: true, lastName: true, employmentType: true, attendanceRequired: true } } },
     }),
     prisma.attendanceRecord.count({ where }),
   ]);
-  return { items, total, page, pageSize };
+
+  // The same valuation the Attendance page renders, so a day opened from the
+  // employee record and the same day opened from the attendance list cannot
+  // show different money.
+  const employee = await prisma.employee.findUniqueOrThrow({
+    where: { id },
+    select: { id: true, employmentType: true, attendanceRequired: true },
+  });
+  const valuations = await valueAttendanceRecords(
+    items.map((item) => ({
+      id: item.id,
+      employeeId: item.employeeId,
+      workDate: item.workDate,
+      workedMinutes: item.workedMinutes,
+      lateMinutes: item.lateMinutes,
+      isAbsent: item.isAbsent,
+      isHoliday: item.isHoliday,
+      isWeekend: item.isWeekend,
+      status: item.status,
+    })),
+    new Map([[employee.id, employee]])
+  );
+
+  return {
+    items: items.map((item) => ({ ...item, dailyPay: valuations.get(item.id) ?? null })),
+    total,
+    page,
+    pageSize,
+  };
 }
 
 // --- departments & positions -------------------------------------------------

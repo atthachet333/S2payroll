@@ -8,6 +8,7 @@ import {
   monthlyEndMinutes,
 } from '../src/services/attendance.service.js';
 import { lateDeductionHours } from '../src/utils/attendance-math.js';
+import { chargeableLateHours } from '../src/utils/time-rounding.js';
 import { calculatePayroll, dailyRate, hourlyRate } from '../src/services/payroll-calculator.service.js';
 import { PayrollSettings } from '../src/services/settings.service.js';
 import { dec } from '../src/utils/money.js';
@@ -19,7 +20,9 @@ import { dec } from '../src/utils/money.js';
  *   lateness         max(0, checkIn - 08:30), no flexible-arrival window
  *   required out     always 17:30 - a late arrival does not push it later, and
  *                    staying later does not cancel the lateness
- *   late charging    whole-hour blocks, ceil(lateMinutes / 60)
+ *   late charging    floor the observed minutes to the company interval, then
+ *                    ceil what remains to whole hours. 10 minutes rounds to 0
+ *                    and costs nothing; 16 rounds to 15 and costs one hour.
  *   salary to day    salary / 30
  *   day to hour      dayRate / 8
  */
@@ -157,11 +160,15 @@ describe('late deduction hours are whole-hour blocks', () => {
     expect(lateDeductionHours(-5)).toBe(0);
   });
 
-  it('keeps minutes and charged hours as separate facts', () => {
-    // 10 observed minutes, 1 charged hour - the pair must stay auditable.
+  it('keeps observed minutes, rounded minutes and charged hours separate', () => {
+    // The record stores 10 observed minutes for ever. The company interval
+    // floors that to 0, so no hour block is charged - all three facts stay
+    // visible rather than collapsing into one.
     const day = monthlyDay('08:40', '17:30');
     expect(day.lateMinutes).toBe(10);
-    expect(lateDeductionHours(day.lateMinutes)).toBe(1);
+    expect(chargeableLateHours(day.lateMinutes, 15)).toBe(0);
+    // The second stage on its own is unchanged; it is the input that is floored.
+    expect(lateDeductionHours(15)).toBe(1);
   });
 });
 
@@ -260,6 +267,10 @@ const emptyAttendance = {
   unpaidLeaveDays: 0,
   lateCount: 0,
   lateMinutes: 0,
+  roundedLateMinutes: 0,
+  earlyLeaveMinutes: 0,
+  roundedEarlyLeaveMinutes: 0,
+  actualOtMinutes: 0,
   workedMinutes: 0,
   normalMinutes: 0,
   otWeekdayMinutes: 0,
@@ -274,7 +285,7 @@ describe('payroll example: 18,000 with one absence and 10 minutes late', () => {
   const result = calculatePayroll(
     {
       employee: monthlyEmployee(18000),
-      attendance: { ...emptyAttendance, absentDays: 1, lateCount: 1, lateMinutes: 10 },
+      attendance: { ...emptyAttendance, absentDays: 1, lateCount: 1, lateMinutes: 10, roundedLateMinutes: 0 },
       manualIncomes: [
         { kind: PayrollItemKind.BONUS, label: 'โบนัส', amount: 1000 },
       ],
@@ -290,9 +301,12 @@ describe('payroll example: 18,000 with one absence and 10 minutes late', () => {
     expect(result.absenceDeduction.toString()).toBe('600');
   });
 
-  it('charges one hour for 10 minutes of lateness', () => {
-    expect(result.lateDeductionHours).toBe(1);
-    expect(result.lateDeduction.toString()).toBe('75');
+  it('charges nothing for 10 minutes of lateness', () => {
+    // The company-wide 15-minute floor forgives anything under one interval:
+    // 10 observed minutes round down to 0, so no hour block is charged. This
+    // supersedes the earlier rule, which billed a full hour here.
+    expect(result.lateDeductionHours).toBe(0);
+    expect(result.lateDeduction.toString()).toBe('0');
   });
 
   it('grosses 19,000 with the bonus itemised separately from base salary', () => {
@@ -301,12 +315,13 @@ describe('payroll example: 18,000 with one absence and 10 minutes late', () => {
     expect(result.grossIncome.toString()).toBe('19000');
   });
 
-  it('totals 1,525 of deductions', () => {
-    expect(result.totalDeduction.toString()).toBe('1525');
+  it('totals 1,450 of deductions', () => {
+    // 600 absence + 0 late + 750 SSO + 100 tax.
+    expect(result.totalDeduction.toString()).toBe('1450');
   });
 
-  it('nets 17,475', () => {
-    expect(result.netSalary.toString()).toBe('17475');
+  it('nets 17,550', () => {
+    expect(result.netSalary.toString()).toBe('17550');
   });
 
   it('keeps every deduction itemised rather than merged', () => {
@@ -318,27 +333,52 @@ describe('payroll example: 18,000 with one absence and 10 minutes late', () => {
 });
 
 describe('late deduction scales by whole-hour block, not by minute', () => {
+  // The company floors lateness to the rounding interval before charging it,
+  // so the aggregate carries both the observed and the floored value.
   const run = (lateMinutes: number) =>
     calculatePayroll(
       {
         employee: monthlyEmployee(18000),
-        attendance: { ...emptyAttendance, lateCount: 1, lateMinutes },
+        attendance: {
+          ...emptyAttendance,
+          lateCount: 1,
+          lateMinutes,
+          roundedLateMinutes: Math.floor(lateMinutes / 15) * 15,
+        },
       },
       settings()
     );
 
-  it('10 minutes late deducts one hour at 75', () => {
+  it('10 minutes late is forgiven by the 15-minute floor', () => {
     const r = run(10);
+    expect(r.lateDeductionHours).toBe(0);
+    expect(r.lateDeduction.toString()).toBe('0');
+  });
+
+  it('16 minutes late reaches the first hour block', () => {
+    // floor 15 -> ceil to 1 hour.
+    const r = run(16);
     expect(r.lateDeductionHours).toBe(1);
     expect(r.lateDeduction.toString()).toBe('75');
+  });
+
+  it('59 minutes late is still one hour', () => {
+    expect(run(59).lateDeduction.toString()).toBe('75');
   });
 
   it('60 minutes late still deducts one hour', () => {
     expect(run(60).lateDeduction.toString()).toBe('75');
   });
 
-  it('61 minutes late deducts two hours at 150', () => {
+  it('61 minutes late is one hour, because the floor takes it back to 60', () => {
     const r = run(61);
+    expect(r.lateDeductionHours).toBe(1);
+    expect(r.lateDeduction.toString()).toBe('75');
+  });
+
+  it('76 minutes late reaches the second hour block', () => {
+    // floor 75 -> ceil to 2 hours.
+    const r = run(76);
     expect(r.lateDeductionHours).toBe(2);
     expect(r.lateDeduction.toString()).toBe('150');
   });

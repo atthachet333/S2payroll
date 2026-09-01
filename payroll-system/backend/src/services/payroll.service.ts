@@ -15,6 +15,10 @@ import { companyClock, cycleBounds, dayjs, eachDay, formatDateOnly, thaiMonthLab
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { isScheduledWorkday } from './schedule-policy.service.js';
 import { payrollEligibleEmployeeWhere } from './employee-payroll-eligibility.service.js';
+import { latestProfile, loadPeriodContext } from './payroll-employee-context.service.js';
+import { NON_FINAL_STATUSES } from '../utils/payroll-readiness.js';
+import { attendanceCloseMinutes, classifyOpenPunch } from '../utils/attendance-window.js';
+import { floorToInterval, roundingIntervalMinutes } from '../utils/time-rounding.js';
 
 export interface Actor {
   userId: string;
@@ -52,6 +56,27 @@ export function assertTransition(from: PayrollPeriodStatus, to: PayrollPeriodSta
 export function assertNotLocked(status: PayrollPeriodStatus): void {
   if (FINANCIALLY_FROZEN.includes(status)) {
     throw forbidden('รอบเงินเดือนถูกล็อกแล้ว ไม่สามารถแก้ไขข้อมูลทางการเงินได้');
+  }
+}
+
+/**
+ * Periods whose figures have been handed over as real money and must not be
+ * edited in place. PAID means the transfer has happened; changing the numbers
+ * afterwards would leave the payroll record disagreeing with the bank. Getting
+ * back in requires the existing status/unlock workflow, which is audited.
+ */
+const FINANCIALLY_EDITABLE: PayrollPeriodStatus[] = [
+  PayrollPeriodStatus.DRAFT,
+  PayrollPeriodStatus.ATTENDANCE_REVIEW,
+  PayrollPeriodStatus.CALCULATED,
+  PayrollPeriodStatus.REVIEW,
+];
+
+export function assertFinanciallyEditable(status: PayrollPeriodStatus): void {
+  if (!FINANCIALLY_EDITABLE.includes(status)) {
+    throw forbidden(
+      'รอบเงินเดือนนี้อนุมัติหรือจ่ายเงินแล้ว ไม่สามารถแก้ไขรายการได้ กรุณาใช้ขั้นตอนย้อนสถานะหรือปลดล็อกที่มีการบันทึกผู้ดำเนินการ'
+    );
   }
 }
 
@@ -209,6 +234,13 @@ export async function aggregateAttendance(
 ): Promise<{ aggregates: Map<string, AttendanceAggregate>; workingDays: number }> {
   const period = await getPeriod(periodId);
   const scheduleSettings = await loadSettings();
+  // Someone who has checked in today and not yet left is at work, not missing
+  // data. Counting today's open punch as a fault would push every currently
+  // working employee into ATTENDANCE_INCOMPLETE and make an open-period preview
+  // useless - and it would disagree with the readiness screen, which has always
+  // drawn this distinction.
+  const closeMinutes = attendanceCloseMinutes(scheduleSettings);
+  const interval = roundingIntervalMinutes(scheduleSettings);
 
   const [records, leaves, holidays] = await Promise.all([
     prisma.attendanceRecord.findMany({
@@ -247,6 +279,10 @@ export async function aggregateAttendance(
     unpaidLeaveDays: 0,
     lateCount: 0,
     lateMinutes: 0,
+    roundedLateMinutes: 0,
+    earlyLeaveMinutes: 0,
+    roundedEarlyLeaveMinutes: 0,
+    actualOtMinutes: 0,
     workedMinutes: 0,
     normalMinutes: 0,
     otWeekdayMinutes: 0,
@@ -264,18 +300,40 @@ export async function aggregateAttendance(
     // here while the imported originals stay untouched on the record.
     agg.workedMinutes += record.workedMinutes;
     agg.normalMinutes += record.normalMinutes;
+    // Observed and floored figures are accumulated side by side. The floor is
+    // applied per day, so the period total is the sum of the values the
+    // Attendance page shows - summing raw minutes and flooring once at the end
+    // would give a total that does not match any row on screen.
     agg.lateMinutes += record.lateMinutes;
+    agg.roundedLateMinutes += floorToInterval(record.lateMinutes, interval);
     if (record.lateMinutes > 0) agg.lateCount += 1;
+    agg.earlyLeaveMinutes += record.earlyLeaveMinutes;
+    agg.roundedEarlyLeaveMinutes += floorToInterval(record.earlyLeaveMinutes, interval);
     if (record.isAbsent) agg.absentDays += 1;
-    if (record.status === 'MISSING_DATA') agg.missingDataDays += 1;
-    if (record.isMissingCheckIn) agg.missingCheckInDays += 1;
-    if (record.isMissingCheckOut) agg.missingCheckOutDays += 1;
+
+    const inProgress =
+      classifyOpenPunch({
+        workDate: record.workDate,
+        checkIn: record.checkIn,
+        checkOut: record.checkOut,
+        closeMinutes,
+      }) === 'IN_PROGRESS';
+    if (!inProgress) {
+      if (record.status === 'MISSING_DATA') agg.missingDataDays += 1;
+      if (record.isMissingCheckIn) agg.missingCheckInDays += 1;
+      if (record.isMissingCheckOut) agg.missingCheckOutDays += 1;
+    }
     if (record.workedMinutes > 0) agg.presentDays += 1;
 
     if (record.otMinutes > 0) {
-      if (record.isHoliday) agg.otHolidayMinutes += record.otMinutes;
-      else if (record.isWeekend) agg.otWeekendMinutes += record.otMinutes;
-      else agg.otWeekdayMinutes += record.otMinutes;
+      // Approved OT is floored on the same interval. Nothing here creates OT -
+      // the attendance engine has already decided what counts as approved
+      // overtime; this only rounds what it produced.
+      agg.actualOtMinutes += record.otMinutes;
+      const otMinutes = floorToInterval(record.otMinutes, interval);
+      if (record.isHoliday) agg.otHolidayMinutes += otMinutes;
+      else if (record.isWeekend) agg.otWeekendMinutes += otMinutes;
+      else agg.otWeekdayMinutes += otMinutes;
     }
 
     result.set(record.employeeId, agg);
@@ -303,7 +361,25 @@ export async function aggregateAttendance(
 // ---------------------------------------------------------------------------
 
 /**
- * Calculate (or recalculate) every active employee in a period.
+ * Calculate (or recalculate) a payroll period, employee by employee.
+ *
+ * The period is never refused because one employee is incomplete. Each person
+ * is calculated from whatever is actually known about them and carries their own
+ * readiness status, so a missing hourly rate on one row stops that row alone:
+ *
+ *   READY                 complete and final
+ *   PARTIAL               calculated, but not a settled figure yet
+ *   UNCONFIGURED          no wage rate - worked time is reported, money is not
+ *   ATTENDANCE_INCOMPLETE a past day has one punch missing
+ *   EXCLUDED              not payable under company policy
+ *
+ * Nothing is invented for an UNCONFIGURED employee. Their hours are real and
+ * their pay is zero, flagged pay_configured = false so no screen and no payslip
+ * can mistake that zero for a salary.
+ *
+ * Only findings that would corrupt *every* row - an overlapping period, broken
+ * settings, a negative wage - still block, because those are properties of the
+ * period rather than of a person.
  *
  * Manual income/deduction lines and manual field adjustments already recorded
  * against a payroll employee are preserved across recalculations; only the
@@ -318,41 +394,23 @@ export async function calculatePeriod(
   assertNotLocked(period.status);
   assertTransition(period.status, PayrollPeriodStatus.CALCULATED);
 
-  // Refuse to produce numbers while a blocking data problem stands. The check
-  // is enforced here rather than only in the UI, so the API cannot be used to
-  // skip it. `skipChecks` exists for tests and deliberate overrides only.
+  // Period-scoped problems still stop the run: they would make every row wrong,
+  // not one. Employee-scoped problems are carried on the rows instead.
+  // `skipChecks` exists for tests and deliberate overrides only.
   if (!options.skipChecks) {
     const report = await runPrePayrollChecks(periodId);
-    if (!report.canCalculate) {
-      const blockers = report.findings
-        .filter((f) => f.severity === 'BLOCKING')
-        .map((f) => `${f.title} (${f.count})`)
-        .join(', ');
+    const blockers = report.findings.filter((f) => f.severity === 'BLOCKING');
+    if (blockers.length > 0) {
       throw badRequest(
-        `ไม่สามารถคำนวณเงินเดือนได้ เนื่องจากยังมีปัญหาที่ต้องแก้ไขก่อน: ${blockers}`
+        'ไม่สามารถคำนวณเงินเดือนได้ เนื่องจากยังมีปัญหาระดับรอบที่ต้องแก้ไขก่อน: ' +
+          blockers.map((f) => `${f.title} (${f.count})`).join(', ')
       );
     }
   }
 
-  const settings = await loadSettingsForDate(period.endDate);
+  const context = await loadPeriodContext(period);
+  const settings = context.settings;
   const { aggregates, workingDays: periodWorkingDays } = await aggregateAttendance(periodId);
-
-  const employees = await prisma.employee.findMany({
-    where: payrollEligibleEmployeeWhere(period),
-    include: {
-      department: true,
-      position: true,
-      payProfiles: {
-        where: {
-          isActive: true,
-          effectiveFrom: { lte: period.endDate },
-          OR: [{ effectiveTo: null }, { effectiveTo: { gte: period.endDate } }],
-        },
-        orderBy: { effectiveFrom: 'desc' },
-        take: 1,
-      },
-    },
-  });
 
   // Manual lines and adjustments survive a recalculation.
   const existingRows = await prisma.payrollEmployee.findMany({
@@ -369,10 +427,23 @@ export async function calculatePeriod(
   let deductionTotal = new Decimal(0);
   let netTotal = new Decimal(0);
 
-  for (const employee of employees) {
+  const statusCounts: Record<PayrollEmployeeStatus, number> = {
+    READY: 0,
+    PARTIAL: 0,
+    UNCONFIGURED: 0,
+    ATTENDANCE_INCOMPLETE: 0,
+    NEEDS_REVIEW: 0,
+    MISSING_DATA: 0,
+    EXCLUDED: 0,
+  };
+  const skipped: { employeeCode: string; employeeName: string; status: PayrollEmployeeStatus; reasons: string[] }[] = [];
+
+  for (const entry of context.employees) {
+    const employee = entry.employee;
+
     // An employee with no attendance rows at all still carries the period's
-    // working days, so the calculator flags them MISSING_DATA rather than
-    // quietly paying a full salary against zero recorded attendance.
+    // working days, so readiness flags them incomplete rather than quietly
+    // paying a full salary against zero recorded attendance.
     const attendance: AttendanceAggregate = aggregates.get(employee.id) ?? {
       workingDays: periodWorkingDays,
       presentDays: 0,
@@ -381,6 +452,10 @@ export async function calculatePeriod(
       unpaidLeaveDays: 0,
       lateCount: 0,
       lateMinutes: 0,
+      roundedLateMinutes: 0,
+      earlyLeaveMinutes: 0,
+      roundedEarlyLeaveMinutes: 0,
+      actualOtMinutes: 0,
       workedMinutes: 0,
       normalMinutes: 0,
       otWeekdayMinutes: 0,
@@ -390,12 +465,6 @@ export async function calculatePeriod(
       missingCheckInDays: 0,
       missingCheckOutDays: 0,
     };
-
-    // Days the employee was actually on the payroll inside this period.
-    const employedFrom = employee.startDate > period.startDate ? employee.startDate : period.startDate;
-    const employedTo =
-      employee.endDate && employee.endDate < period.endDate ? employee.endDate : period.endDate;
-    const employedDays = eachDay(employedFrom, employedTo).filter((d) => isScheduledWorkday(d, settings)).length;
 
     const prior = existingByEmployee.get(employee.id);
     const manualIncomes: ManualItem[] = (prior?.incomes ?? []).map((i) => ({
@@ -415,6 +484,13 @@ export async function calculatePeriod(
       note: d.note,
     }));
 
+    // employee_pay_profiles is the single source of compensation. The monthly
+    // headline comes from the profile in force at the end of the period; hourly
+    // staff are never priced from a single profile at all - every one of their
+    // days was already valued at the rate in force on that date.
+    const profile = latestProfile(entry);
+    const earnings = entry.dailyEarnings;
+
     const result = calculatePayroll(
       {
         employee: {
@@ -425,21 +501,48 @@ export async function calculatePeriod(
           positionName: employee.position?.name ?? null,
           employmentType: employee.employmentType,
           baseSalary: employee.baseSalary,
-          payType: employee.payProfiles[0]?.payType,
-          monthlySalary: employee.payProfiles[0]?.monthlySalary,
-          hourlyRate: employee.payProfiles[0]?.hourlyRate,
+          payType: profile?.payType,
+          monthlySalary: profile?.monthlySalary,
+          hourlyRate: profile?.hourlyRate,
           ssoEnabled: employee.ssoEnabled,
           taxEnabled: employee.taxEnabled,
           otEligible: employee.otEligible,
           attendanceRequired: employee.attendanceRequired,
-          employedDays,
+          employedDays: entry.employedDays,
+          policy: entry.policy,
+          payConfigured: entry.payConfigured,
+          excluded: entry.excluded,
         },
         attendance,
         manualIncomes,
         manualDeductions,
+        dailyEarnings: earnings
+          ? {
+              amount: earnings.totalAmount,
+              totalWorkedMinutes: earnings.totalWorkedMinutes,
+              totalBreakDeductionMinutes: earnings.totalBreakDeductionMinutes,
+              totalPayableMinutes: earnings.totalPayableMinutes,
+              totalRoundedAwayMinutes: earnings.totalRoundedAwayMinutes,
+              ratedMinutes: earnings.ratedMinutes,
+              unratedMinutes: earnings.unratedMinutes,
+              unratedDays: earnings.unratedDays,
+              workedDays: earnings.workedDays,
+            }
+          : undefined,
+        isEstimate: context.isPreview,
       },
       settings
     );
+
+    statusCounts[result.status] += 1;
+    if (result.status !== PayrollEmployeeStatus.READY) {
+      skipped.push({
+        employeeCode: employee.employeeCode,
+        employeeName: `${employee.firstName} ${employee.lastName}`,
+        status: result.status,
+        reasons: result.reviewNotes,
+      });
+    }
 
     const data = {
       employeeCode: employee.employeeCode,
@@ -452,6 +555,7 @@ export async function calculatePeriod(
       presentDays: attendance.presentDays,
       absentDays: attendance.absentDays,
       leaveDays: toPrismaHours(attendance.leaveDays),
+      unpaidLeaveDays: toPrismaHours(attendance.unpaidLeaveDays),
       lateCount: attendance.lateCount,
       lateMinutes: attendance.lateMinutes,
       workingHours: toPrismaHours(result.workingHours),
@@ -464,6 +568,18 @@ export async function calculatePeriod(
       missingCheckInDays: attendance.missingCheckInDays,
       missingCheckOutDays: attendance.missingCheckOutDays,
 
+      dailyBase: toPrismaDecimal(result.dailyBase),
+      hourlyBase: toPrismaDecimal(result.hourlyBase),
+      // Derived for money only. workingHours above stays the true observed
+      // duration, so the row records both what happened and what was paid.
+      breakDeductionMinutes: result.breakDeductionMinutes,
+      payableMinutes: result.payableMinutes,
+      roundedAwayMinutes: result.roundedAwayMinutes,
+      roundedLateMinutes: result.roundedLateMinutes,
+      earlyLeaveMinutes: result.earlyLeaveMinutes,
+      roundedEarlyLeaveMinutes: result.roundedEarlyLeaveMinutes,
+      actualOtMinutes: result.actualOtMinutes,
+
       baseSalary: toPrismaDecimal(result.baseSalary),
       otAmount: toPrismaDecimal(result.otAmount),
       allowanceAmount: toPrismaDecimal(result.allowanceAmount),
@@ -473,6 +589,8 @@ export async function calculatePeriod(
       grossIncome: toPrismaDecimal(result.grossIncome),
 
       lateDeduction: toPrismaDecimal(result.lateDeduction),
+      lateDeductionHours: result.lateDeductionHours,
+      leaveDeduction: toPrismaDecimal(result.leaveDeduction),
       absenceDeduction: toPrismaDecimal(result.absenceDeduction),
       socialSecurity: toPrismaDecimal(result.socialSecurity),
       tax: toPrismaDecimal(result.tax),
@@ -482,6 +600,8 @@ export async function calculatePeriod(
 
       netSalary: toPrismaDecimal(result.netSalary),
       status: result.status,
+      payConfigured: result.payConfigured,
+      isEstimate: result.isEstimate,
       reviewNotes: result.reviewNotes as unknown as Prisma.InputJsonValue,
       calculatedAt: new Date(),
     };
@@ -538,8 +658,10 @@ export async function calculatePeriod(
     netTotal = netTotal.plus(result.netSalary);
   }
 
-  // Drop rows for employees that no longer belong in this period.
-  const validIds = new Set(employees.map((e) => e.id));
+  // Drop rows for employees that no longer belong in this period - deactivated
+  // staff among them, which is how a deactivation reaches an already-calculated
+  // period.
+  const validIds = new Set(context.employees.map((e) => e.employee.id));
   await prisma.payrollEmployee.deleteMany({
     where: { periodId, employeeId: { notIn: [...validIds] } },
   });
@@ -548,7 +670,7 @@ export async function calculatePeriod(
     where: { id: periodId },
     data: {
       status: PayrollPeriodStatus.CALCULATED,
-      totalEmployees: employees.length,
+      totalEmployees: context.employees.length,
       grossTotal: toPrismaDecimal(grossTotal),
       otTotal: toPrismaDecimal(otTotal),
       deductionTotal: toPrismaDecimal(deductionTotal),
@@ -564,9 +686,10 @@ export async function calculatePeriod(
     entity: 'PayrollPeriod',
     entityId: periodId,
     newValue: {
-      employees: employees.length,
+      employees: context.employees.length,
       gross: grossTotal.toFixed(2),
       net: netTotal.toFixed(2),
+      statusCounts,
     },
     userId: actor.userId,
     userEmail: actor.email,
@@ -574,7 +697,7 @@ export async function calculatePeriod(
     userAgent: actor.userAgent,
   });
 
-  return updated;
+  return { ...updated, statusCounts, skipped };
 }
 
 // ---------------------------------------------------------------------------
@@ -628,12 +751,16 @@ export async function approvePeriod(periodId: string, actor: Actor) {
   await assertPeriodFinalizable(periodId);
   const settings = await loadSettings();
   if (settings.boolean('BLOCK_APPROVE_ON_MISSING_DATA')) {
+    // Approval is the point at which the figures become real, so every row
+    // whose amount is not final has to be resolved first - an unset wage rate
+    // just as much as a missing punch. Calculation stays open to all of them;
+    // only approval is gated.
     const blocking = await prisma.payrollEmployee.count({
-      where: { periodId, status: PayrollEmployeeStatus.MISSING_DATA },
+      where: { periodId, status: { in: NON_FINAL_STATUSES } },
     });
     if (blocking > 0) {
       throw badRequest(
-        `ยังมีพนักงาน ${blocking} คนที่ข้อมูลไม่ครบ กรุณาตรวจสอบก่อนอนุมัติ`
+        `ยังมีพนักงาน ${blocking} คนที่ข้อมูลยังไม่ครบหรือยังไม่ได้กำหนดค่าจ้าง กรุณาตรวจสอบก่อนอนุมัติ`
       );
     }
   }
@@ -797,7 +924,7 @@ export async function getPeriodEmployee(periodId: string, employeeId: string) {
       deductions: { orderBy: { createdAt: 'asc' } },
       adjustments: { orderBy: { changedAt: 'desc' } },
       employee: {
-        include: { department: true, position: true },
+        include: { department: true, position: true, payrollPolicy: true },
       },
       period: true,
       payslip: { select: { id: true, payslipNo: true } },
@@ -818,6 +945,9 @@ export async function periodSummary(periodId: string) {
 
   const statusCounts: Record<string, number> = {
     READY: 0,
+    PARTIAL: 0,
+    UNCONFIGURED: 0,
+    ATTENDANCE_INCOMPLETE: 0,
     NEEDS_REVIEW: 0,
     MISSING_DATA: 0,
     EXCLUDED: 0,
@@ -847,8 +977,15 @@ export async function periodSummary(periodId: string) {
     workingHours: dec(totals._sum.workingHours ?? 0).toFixed(2),
     otHours: dec(totals._sum.otHours ?? 0).toFixed(2),
     ready: statusCounts.READY,
-    needsReview: statusCounts.NEEDS_REVIEW,
-    missingData: statusCounts.MISSING_DATA,
+    // MISSING_DATA and NEEDS_REVIEW are legacy statuses; rows written before
+    // per-employee readiness existed still carry them, so they are folded into
+    // the counters their successors replaced rather than disappearing.
+    partial: statusCounts.PARTIAL + statusCounts.NEEDS_REVIEW,
+    unconfigured: statusCounts.UNCONFIGURED,
+    attendanceIncomplete: statusCounts.ATTENDANCE_INCOMPLETE + statusCounts.MISSING_DATA,
+    excluded: statusCounts.EXCLUDED,
+    needsReview: statusCounts.NEEDS_REVIEW + statusCounts.PARTIAL,
+    missingData: statusCounts.MISSING_DATA + statusCounts.ATTENDANCE_INCOMPLETE,
     statusCounts,
   };
 }
@@ -863,6 +1000,7 @@ const ADJUSTABLE_FIELDS = [
   'loanDeduction',
   'otherDeduction',
   'lateDeduction',
+  'leaveDeduction',
   'absenceDeduction',
   'socialSecurity',
   'tax',
@@ -887,6 +1025,7 @@ const ADJUSTABLE_FIELD_LINES: Record<
   loanDeduction: { kind: PayrollItemKind.LOAN, label: 'หักเงินกู้', side: 'deduction' },
   otherDeduction: { kind: PayrollItemKind.OTHER_DEDUCTION, label: 'หักอื่น ๆ', side: 'deduction' },
   lateDeduction: { kind: PayrollItemKind.LATE, label: 'หักมาสาย (ปรับปรุง)', side: 'deduction' },
+  leaveDeduction: { kind: PayrollItemKind.LEAVE, label: 'หักลา (ปรับปรุง)', side: 'deduction' },
   absenceDeduction: { kind: PayrollItemKind.ABSENCE, label: 'หักขาดงาน (ปรับปรุง)', side: 'deduction' },
   socialSecurity: { kind: PayrollItemKind.SOCIAL_SECURITY, label: 'ประกันสังคม', side: 'deduction' },
   tax: { kind: PayrollItemKind.TAX, label: 'ภาษีหัก ณ ที่จ่าย', side: 'deduction' },
@@ -911,6 +1050,7 @@ export async function adjustPayrollEmployee(
 ) {
   const period = await getPeriod(periodId);
   assertNotLocked(period.status);
+  assertFinanciallyEditable(period.status);
 
   const row = await prisma.payrollEmployee.findUnique({
     where: { period_employee: { periodId, employeeId } },
@@ -926,6 +1066,7 @@ export async function adjustPayrollEmployee(
     loanDeduction: dec(row.loanDeduction),
     otherDeduction: dec(row.otherDeduction),
     lateDeduction: dec(row.lateDeduction),
+    leaveDeduction: dec(row.leaveDeduction),
     absenceDeduction: dec(row.absenceDeduction),
     socialSecurity: dec(row.socialSecurity),
     tax: dec(row.tax),
@@ -961,6 +1102,7 @@ export async function adjustPayrollEmployee(
   );
   const totalDeduction = money(
     next.lateDeduction
+      .plus(next.leaveDeduction)
       .plus(next.absenceDeduction)
       .plus(next.socialSecurity)
       .plus(next.tax)
@@ -981,6 +1123,7 @@ export async function adjustPayrollEmployee(
         loanDeduction: toPrismaDecimal(next.loanDeduction),
         otherDeduction: toPrismaDecimal(next.otherDeduction),
         lateDeduction: toPrismaDecimal(next.lateDeduction),
+        leaveDeduction: toPrismaDecimal(next.leaveDeduction),
         absenceDeduction: toPrismaDecimal(next.absenceDeduction),
         socialSecurity: toPrismaDecimal(next.socialSecurity),
         tax: toPrismaDecimal(next.tax),
@@ -988,10 +1131,11 @@ export async function adjustPayrollEmployee(
         totalDeduction: toPrismaDecimal(totalDeduction),
         netSalary: toPrismaDecimal(netSalary),
         hasAdjustment: true,
-        status:
-          row.status === PayrollEmployeeStatus.MISSING_DATA
-            ? PayrollEmployeeStatus.NEEDS_REVIEW
-            : row.status,
+        // A human has now put a figure on this row, so it is no longer raw
+        // incomplete data - but it is still not a settled amount.
+        status: NON_FINAL_STATUSES.includes(row.status)
+          ? PayrollEmployeeStatus.PARTIAL
+          : row.status,
       },
     });
 
@@ -1043,7 +1187,7 @@ export async function adjustPayrollEmployee(
   await refreshPeriodTotals(periodId);
 
   await recordAudit({
-    action: 'PAYROLL_ADJUST',
+    action: 'PAYROLL_EMPLOYEE_ADJUSTMENT',
     entity: 'PayrollEmployee',
     entityId: row.id,
     oldValue: Object.fromEntries(changes.map((c) => [c.fieldName, c.oldValue])),

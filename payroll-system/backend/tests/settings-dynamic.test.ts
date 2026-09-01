@@ -125,7 +125,9 @@ describe('policy values come from settings rather than the source', () => {
     expect(hourlyRate(employee, settings({ STANDARD_PAID_HOURS_PER_DAY: '10' })).toString()).toBe('60');
   });
 
-  it('switches the DAILY break deduction from settings', () => {
+  it('records the full DAILY duration regardless of the withdrawn break flag', () => {
+    // The DAILY break moved to payroll, where it is applied once. Attendance
+    // keeps the observed duration so the two figures stay distinguishable.
     const daily = (over: Record<string, string>) =>
       computeAttendanceMetrics(
         {
@@ -136,7 +138,7 @@ describe('policy values come from settings rather than the source', () => {
         settings(over)
       ).workedMinutes;
     expect(daily({})).toBe(540);
-    expect(daily({ DAILY_DEDUCT_BREAK: 'true' })).toBe(480);
+    expect(daily({ DAILY_DEDUCT_BREAK: 'true' })).toBe(540);
   });
 
   it('switches OT per employment type from settings', () => {

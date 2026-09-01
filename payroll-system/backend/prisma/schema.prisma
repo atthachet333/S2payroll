@@ -94,9 +94,42 @@ enum PayrollPeriodStatus {
 
 enum PayrollEmployeeStatus {
   READY
+  /// Calculated, but something about it is not final: an open period, a rate
+  /// that covers only part of the days worked, or an absence needing review.
+  PARTIAL
+  /// No usable wage rate for this employee - worked time is still reported but
+  /// no money is invented. Never a final salary.
+  UNCONFIGURED
+  /// A past day has one punch missing, so no final amount can be stated.
+  ATTENDANCE_INCOMPLETE
+  /// Legacy value. Kept so historical rows keep their meaning; new
+  /// calculations use ATTENDANCE_INCOMPLETE or PARTIAL instead.
   NEEDS_REVIEW
+  /// Legacy synonym of ATTENDANCE_INCOMPLETE, retained for existing rows.
   MISSING_DATA
   EXCLUDED
+}
+
+/// How lateness turns into money for one employee.
+enum LateDeductionType {
+  NONE
+  PER_HOUR_FROM_BASE
+  FIXED_AMOUNT
+}
+
+/// How an approved-but-unpaid leave day turns into money for one employee.
+enum LeaveDeductionType {
+  NONE
+  PER_DAY_FROM_BASE
+  FIXED_AMOUNT
+}
+
+/// How an unexcused absent day turns into money for one employee.
+/// NONE exists for staff whose pay does not depend on attendance.
+enum AbsenceDeductionType {
+  NONE
+  PER_DAY_FROM_BASE
+  FIXED_AMOUNT
 }
 
 enum PayrollItemKind {
@@ -108,6 +141,7 @@ enum PayrollItemKind {
   OTHER_INCOME
   LATE
   ABSENCE
+  LEAVE
   SOCIAL_SECURITY
   TAX
   LOAN
@@ -259,6 +293,12 @@ model Employee {
   employmentType        EmploymentType @default(MONTHLY) @map("employment_type")
   startDate             DateTime       @map("start_date") @db.Date
   endDate               DateTime?      @map("end_date") @db.Date
+  /// Most recent return-to-work date, set when a deactivated employee is
+  /// restored. start_date stays the original hire date - it is the person's
+  /// history and the detail page shows it - while payroll eligibility uses this
+  /// when present, so bringing someone back does not make them retroactively
+  /// payable for every period they were away for.
+  reactivatedAt         DateTime?      @map("reactivated_at") @db.Date
   baseSalary            Decimal        @default(0) @map("base_salary") @db.Decimal(15, 2)
   bankName              String?        @map("bank_name") @db.VarChar(100)
   bankAccount           String?        @map("bank_account") @db.VarChar(64)
@@ -284,6 +324,7 @@ model Employee {
   payrollEmployees       PayrollEmployee[]
   salaryHistory          SalaryHistory[]
   payProfiles            EmployeePayProfile[]
+  payrollPolicy          EmployeePayrollPolicy?
   payslips               Payslip[]
 
   @@index([departmentId])
@@ -311,6 +352,44 @@ model EmployeePayProfile {
   @@unique([employeeId, effectiveFrom], name: "employee_pay_effective_from")
   @@index([employeeId, isActive, effectiveFrom])
   @@map("employee_pay_profiles")
+}
+
+/// Per-employee payroll policy: how lateness, leave and absence are priced for
+/// this one person, plus the fixed statutory amounts payroll enters by hand.
+///
+/// Every column is nullable on purpose. NULL means "not configured for this
+/// employee", and the calculator falls back to the company-wide PayrollSetting
+/// - so creating a row here can never silently change an existing employee's
+/// pay. A stored 0 is a real decision meaning "deduct nothing", which is why it
+/// has to be distinguishable from NULL.
+model EmployeePayrollPolicy {
+  id         String @id @default(uuid()) @db.Char(36)
+  employeeId String @unique @map("employee_id") @db.Char(36)
+
+  lateDeductionType   LateDeductionType? @map("late_deduction_type")
+  lateDeductionAmount Decimal?           @map("late_deduction_amount") @db.Decimal(15, 2)
+
+  leaveDeductionType   LeaveDeductionType? @map("leave_deduction_type")
+  leaveDeductionAmount Decimal?            @map("leave_deduction_amount") @db.Decimal(15, 2)
+
+  absenceDeductionType   AbsenceDeductionType? @map("absence_deduction_type")
+  absenceDeductionAmount Decimal?              @map("absence_deduction_amount") @db.Decimal(15, 2)
+
+  /// Fixed monthly social security amount. Manual for now - no statutory
+  /// formula is invented here.
+  socialSecurityAmount Decimal? @map("social_security_amount") @db.Decimal(15, 2)
+  /// Fixed monthly withholding tax amount, entered by payroll.
+  taxAmount            Decimal? @map("tax_amount") @db.Decimal(15, 2)
+
+  note      String?  @db.VarChar(500)
+  createdBy String?  @map("created_by") @db.Char(36)
+  updatedBy String?  @map("updated_by") @db.Char(36)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@map("employee_payroll_policies")
 }
 
 model SalaryHistory {
@@ -606,17 +685,50 @@ model PayrollEmployee {
   otherIncome      Decimal @default(0) @map("other_income") @db.Decimal(15, 2)
   grossIncome      Decimal @default(0) @map("gross_income") @db.Decimal(15, 2)
 
-  lateDeduction    Decimal @default(0) @map("late_deduction") @db.Decimal(15, 2)
-  absenceDeduction Decimal @default(0) @map("absence_deduction") @db.Decimal(15, 2)
-  socialSecurity   Decimal @default(0) @map("social_security") @db.Decimal(15, 2)
-  tax              Decimal @default(0) @db.Decimal(15, 2)
-  loanDeduction    Decimal @default(0) @map("loan_deduction") @db.Decimal(15, 2)
-  otherDeduction   Decimal @default(0) @map("other_deduction") @db.Decimal(15, 2)
-  totalDeduction   Decimal @default(0) @map("total_deduction") @db.Decimal(15, 2)
+  /// Unpaid leave days inside the period, kept apart from absentDays because
+  /// leave and absence are priced by two different employee policies.
+  unpaidLeaveDays Decimal @default(0) @map("unpaid_leave_days") @db.Decimal(6, 2)
+  /// DAILY only. The unpaid break removed for days past the eight-hour
+  /// threshold, and the minutes actually paid for after the 15-minute floor.
+  /// workingHours stays the true observed duration; these are derived for money
+  /// and exist so a payslip can explain why 8h44m was paid as 7h30m.
+  breakDeductionMinutes Int @default(0) @map("break_deduction_minutes")
+  payableMinutes        Int @default(0) @map("payable_minutes")
+  /// What the company rounding interval discarded from the period, and the
+  /// observed-versus-charged figures behind the lateness, early-leave and OT
+  /// deductions. Recorded so a payslip can be explained without recomputing it.
+  roundedAwayMinutes       Int @default(0) @map("rounded_away_minutes")
+  roundedLateMinutes       Int @default(0) @map("rounded_late_minutes")
+  earlyLeaveMinutes        Int @default(0) @map("early_leave_minutes")
+  roundedEarlyLeaveMinutes Int @default(0) @map("rounded_early_leave_minutes")
+  actualOtMinutes          Int @default(0) @map("actual_ot_minutes")
+
+  /// Derived display bases: monthlySalary / divisor, and that / paid hours.
+  /// Stored so a payslip can be re-explained without re-deriving the settings.
+  dailyBase       Decimal @default(0) @map("daily_base") @db.Decimal(15, 2)
+  hourlyBase      Decimal @default(0) @map("hourly_base") @db.Decimal(15, 2)
+
+  lateDeduction      Decimal @default(0) @map("late_deduction") @db.Decimal(15, 2)
+  /// Whole-hour blocks charged for lateness: ceil(lateMinutes / 60). Kept apart
+  /// from lateMinutes so the payslip can be audited against attendance.
+  lateDeductionHours Int     @default(0) @map("late_deduction_hours")
+  leaveDeduction     Decimal @default(0) @map("leave_deduction") @db.Decimal(15, 2)
+  absenceDeduction   Decimal @default(0) @map("absence_deduction") @db.Decimal(15, 2)
+  socialSecurity     Decimal @default(0) @map("social_security") @db.Decimal(15, 2)
+  tax                Decimal @default(0) @db.Decimal(15, 2)
+  loanDeduction      Decimal @default(0) @map("loan_deduction") @db.Decimal(15, 2)
+  otherDeduction     Decimal @default(0) @map("other_deduction") @db.Decimal(15, 2)
+  totalDeduction     Decimal @default(0) @map("total_deduction") @db.Decimal(15, 2)
 
   netSalary Decimal @default(0) @map("net_salary") @db.Decimal(15, 2)
 
   status        PayrollEmployeeStatus @default(NEEDS_REVIEW)
+  /// False when no usable wage rate was found. The amounts on this row are then
+  /// worked time only - never a final salary.
+  payConfigured Boolean               @default(true) @map("pay_configured")
+  /// True while the figures are a preview: an open period, or a rate that
+  /// covers only part of the days worked.
+  isEstimate    Boolean               @default(false) @map("is_estimate")
   reviewNotes   Json?                 @map("review_notes")
   hasAdjustment Boolean               @default(false) @map("has_adjustment")
   calculatedAt  DateTime?             @map("calculated_at")

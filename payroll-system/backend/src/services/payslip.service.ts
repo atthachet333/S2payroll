@@ -1,10 +1,10 @@
-import { Prisma } from '@prisma/client';
+import { EmploymentType, Prisma, type PayrollPeriodStatus } from '@prisma/client';
 import { prisma } from '../plugins/prisma.js';
 import { loadSettings } from './settings.service.js';
 import { recordAudit } from './audit.service.js';
 import { money } from '../utils/money.js';
 import { dayjs } from '../utils/datetime.js';
-import { badRequest, notFound } from '../utils/errors.js';
+import { badRequest, notFound, unprocessable } from '../utils/errors.js';
 import type { Actor } from './payroll.service.js';
 
 export interface PayslipLine {
@@ -29,12 +29,51 @@ export interface PayslipSnapshot {
     nickname: string | null;
     department: string | null;
     position: string | null;
+    employmentType: EmploymentType;
     bankName: string | null;
     bankAccount: string | null;
     taxId: string | null;
     socialSecurity: string | null;
   };
-  period: { code: string; name: string; startDate: string; endDate: string };
+  /**
+   * How this employee's pay was arrived at, so the document can be honest about
+   * it: an hourly employee has a rate and worked minutes and no monthly salary,
+   * a salaried one has a salary whose per-day and per-hour bases are derived
+   * figures rather than a second kind of wage.
+   */
+  pay: {
+    kind: 'HOURLY' | 'MONTHLY';
+    /** Hourly rate for hourly staff, else null. */
+    hourlyRate: string | null;
+    /** Monthly salary for salaried staff, else null. */
+    monthlySalary: string | null;
+    dailyBase: string;
+    hourlyBase: string;
+    /** The true observed duration across the period. */
+    workedMinutes: number;
+    /**
+     * DAILY only. The unpaid break removed and the minutes actually paid for.
+     * Kept distinct from workedMinutes so the document never presents paid
+     * hours as though they were the hours the employee stood at work.
+     */
+    breakDeductionMinutes: number;
+    payableMinutes: number;
+    /** What the company rounding interval discarded. */
+    roundedAwayMinutes: number;
+    /** MONTHLY: lateness as observed and after the floor, plus hours charged. */
+    lateMinutes: number;
+    roundedLateMinutes: number;
+    lateChargedHours: number;
+    payConfigured: boolean;
+  };
+  period: {
+    code: string;
+    name: string;
+    startDate: string;
+    endDate: string;
+    /** Payroll workflow status at snapshot time, so a draft can be marked. */
+    status: PayrollPeriodStatus;
+  };
   paymentDate: string | null;
   attendance: {
     workingDays: number;
@@ -60,6 +99,8 @@ async function buildSnapshot(payrollEmployeeId: string): Promise<{
 }> {
   const row = await loadPayrollEmployee(payrollEmployeeId);
   const company = await prisma.company.findFirst();
+  const hourly =
+    row.employmentType === EmploymentType.DAILY || row.employmentType === EmploymentType.HOURLY;
 
   const snapshot: PayslipSnapshot = {
     company: {
@@ -75,16 +116,35 @@ async function buildSnapshot(payrollEmployeeId: string): Promise<{
       nickname: row.employee.nickname,
       department: row.departmentName,
       position: row.positionName,
+      employmentType: row.employmentType,
       bankName: row.employee.bankName,
       bankAccount: row.employee.bankAccount,
       taxId: row.employee.taxId,
       socialSecurity: row.employee.socialSecurity,
+    },
+    pay: {
+      kind: hourly ? 'HOURLY' : 'MONTHLY',
+      // The hourly rate is the derived hourly base, which for hourly staff IS
+      // their stored rate - the payroll run writes it there when it calculates.
+      hourlyRate: hourly ? money(row.hourlyBase).toFixed(2) : null,
+      monthlySalary: hourly ? null : money(row.baseSalary).toFixed(2),
+      dailyBase: money(row.dailyBase).toFixed(2),
+      hourlyBase: money(row.hourlyBase).toFixed(2),
+      workedMinutes: Math.round(Number(row.workingHours) * 60),
+      breakDeductionMinutes: row.breakDeductionMinutes,
+      payableMinutes: row.payableMinutes,
+      roundedAwayMinutes: row.roundedAwayMinutes,
+      lateMinutes: row.lateMinutes,
+      roundedLateMinutes: row.roundedLateMinutes,
+      lateChargedHours: row.lateDeductionHours,
+      payConfigured: row.payConfigured,
     },
     period: {
       code: row.period.code,
       name: row.period.name,
       startDate: dayjs.utc(row.period.startDate).format('YYYY-MM-DD'),
       endDate: dayjs.utc(row.period.endDate).format('YYYY-MM-DD'),
+      status: row.period.status,
     },
     paymentDate: row.period.paymentDate
       ? dayjs.utc(row.period.paymentDate).format('YYYY-MM-DD')
@@ -258,13 +318,38 @@ export async function getPayslip(id: string) {
   return payslip;
 }
 
-/** Live preview for a payroll row that has not been issued as a payslip yet. */
+/**
+ * Live preview built from the calculated payroll row.
+ *
+ * Deliberately not gated on the payroll workflow: a preview is available in
+ * DRAFT, ATTENDANCE_REVIEW, CALCULATED, REVIEW, APPROVED, PAID and LOCKED
+ * alike, and needs no persisted Payslip row. Issuing a payslip is a separate,
+ * approval-gated act that produces the final document; being unable to look at
+ * the figures until then helps nobody.
+ *
+ * The failures a user can actually hit are told apart, in Thai, so the dialog
+ * can explain itself rather than showing a bare "not found".
+ */
 export async function previewPayslip(periodId: string, employeeId: string) {
-  const row = await prisma.payrollEmployee.findUnique({
-    where: { period_employee: { periodId, employeeId } },
+  const period = await prisma.payrollPeriod.findUnique({
+    where: { id: periodId },
     select: { id: true },
   });
-  if (!row) throw notFound('Payroll employee');
+  if (!period) throw notFound('Payroll period');
+
+  const row = await prisma.payrollEmployee.findUnique({
+    where: { period_employee: { periodId, employeeId } },
+    select: { id: true, calculatedAt: true },
+  });
+  if (!row) {
+    throw unprocessable(
+      'ไม่พบรายการเงินเดือนของพนักงานคนนี้ในรอบนี้ กรุณากดคำนวณเงินเดือนก่อน'
+    );
+  }
+  if (!row.calculatedAt) {
+    throw unprocessable('ยังไม่มีผลการคำนวณเงินเดือนของพนักงานคนนี้ในรอบนี้');
+  }
+
   const { snapshot } = await buildSnapshot(row.id);
   return snapshot;
 }

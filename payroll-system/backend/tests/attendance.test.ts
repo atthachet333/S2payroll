@@ -240,9 +240,20 @@ describe('DAILY attendance policy', () => {
     expect(result.status).not.toBe('LATE');
   });
 
-  it('deducts a break only when the explicit DAILY setting is enabled', () => {
+  it('never deducts a break from a DAILY attendance record', () => {
+    // The record must keep the true observed duration. The daily break is
+    // applied once, at payroll time, by the shared payable-time helper -
+    // deducting it here as well would remove it twice and would destroy the
+    // only place the real worked time is stored. DAILY_DEDUCT_BREAK is
+    // withdrawn and no longer read, at either value.
     expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'false' }).workedMinutes).toBe(366);
-    expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'true' }).workedMinutes).toBe(306);
+    expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'true' }).workedMinutes).toBe(366);
+  });
+
+  it('keeps the full duration even on a shift past eight hours', () => {
+    // 08:30 to 17:14 is 524 minutes. Payroll will pay 450 of them; the record
+    // still says 524, because that is what happened.
+    expect(daily(at(8, 30), at(17, 14)).workedMinutes).toBe(524);
   });
 
   it('calculates from displayed whole-minute punches even when source events contain seconds', () => {

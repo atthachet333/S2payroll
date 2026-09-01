@@ -9,6 +9,10 @@ import type {
   Department,
   Employee,
   EmployeePayProfile,
+  EmployeePayrollPolicy,
+  EmployeePayrollPolicyInput,
+  EmployeePayrollPolicyRow,
+  DailyEarnings,
   EmployeePayConfiguration,
   Holiday,
   LeaveRecord,
@@ -52,8 +56,8 @@ export const authApi = {
 // --- overview ----------------------------------------------------------------
 
 export const overviewApi = {
-  get: (periodId?: string) =>
-    unwrap<Overview>(api.get('/api/overview', { params: periodId ? { periodId } : {} })),
+  get: (periodId?: string, months = 6) =>
+    unwrap<Overview>(api.get('/api/overview', { params: { ...(periodId ? { periodId } : {}), months } })),
 };
 
 // --- employees ---------------------------------------------------------------
@@ -92,9 +96,16 @@ export const employeeApi = {
       employee: Employee;
       attendance: {
         totalRecords: number;
+        presentDays: number;
         workedMinutes: number;
         otMinutes: number;
+        roundedOtMinutes: number;
         lateMinutes: number;
+        /** Lateness after the company-wide floor - what money is charged from. */
+        roundedLateMinutes: number;
+        earlyLeaveMinutes: number;
+        roundedEarlyLeaveMinutes: number;
+        roundingIntervalMinutes: number;
         statusCounts: Record<string, number>;
       };
       payslips: Payslip[];
@@ -112,6 +123,28 @@ export const employeeApi = {
     unwrap<Paginated<AttendanceRecord>>(api.get(`/api/employees/${id}/attendance`, { params })),
   createPayProfile: (id: string, data: Record<string, unknown>) =>
     unwrap<EmployeePayProfile>(api.post(`/api/employees/${id}/pay-profiles`, data)),
+  // Employee Edit and Payroll Settings both read and write this one endpoint,
+  // so the two screens can never hold different numbers for the same person.
+  payrollPolicy: (id: string) =>
+    unwrap<EmployeePayrollPolicy | null>(api.get(`/api/employees/${id}/payroll-policy`)),
+  savePayrollPolicy: (id: string, data: EmployeePayrollPolicyInput) =>
+    unwrap<EmployeePayrollPolicy>(api.put(`/api/employees/${id}/payroll-policy`, data)),
+  dailyEarnings: (id: string, params: { year: number; month: number }) =>
+    unwrap<DailyEarnings>(api.get(`/api/employees/${id}/daily-earnings`, { params })),
+  /** Bring a deactivated or terminated employee back onto the payroll. */
+  reactivate: (id: string, data: { returnDate: string; reason: string | null }) =>
+    unwrap<Employee>(api.post(`/api/employees/${id}/reactivate`, data)),
+  /** Record one worked day by hand. Derived values are computed server-side. */
+  createAttendance: (
+    id: string,
+    data: {
+      workDate: string;
+      checkIn: string | null;
+      checkOut: string | null;
+      reason: string;
+      note: string | null;
+    }
+  ) => unwrap<AttendanceRecord>(api.post(`/api/employees/${id}/attendance`, data)),
 };
 
 // --- attendance --------------------------------------------------------------
@@ -349,7 +382,7 @@ export const payslipApi = {
   list: (params: { page?: number; pageSize?: number; periodId?: string; employeeId?: string; search?: string }) =>
     unwrap<Paginated<Payslip>>(api.get('/api/payslips', { params })),
   get: (id: string) => unwrap<Payslip>(api.get(`/api/payslips/${id}`)),
-  /** Server-rendered A4 PDF. Path only — downloadFile() attaches the auth header. */
+  /** Server-rendered A5 PDF. Path only — downloadFile() attaches the auth header. */
   pdfPath: (id: string) => `/api/payslips/${id}/pdf`,
 };
 
@@ -361,6 +394,8 @@ export interface ReportQuery {
   to?: string;
   departmentId?: string;
   employeeId?: string;
+  employmentType?: string;
+  status?: string;
 }
 
 export const reportApi = {
@@ -375,6 +410,11 @@ export const settingsApi = {
     unwrap<PayrollSetting[]>(api.get('/api/settings', { params: group ? { group } : {} })),
   update: (settings: { key: string; value: string }[]) =>
     unwrap<PayrollSetting[]>(api.patch('/api/settings', { settings })),
+  /** Quick-pick daily rates. Suggestions only; any positive amount is valid. */
+  dailyRatePresets: () =>
+    unwrap<{ presets: number[] }>(api.get('/api/settings/daily-rate-presets')),
+  payrollPolicies: () =>
+    unwrap<EmployeePayrollPolicyRow[]>(api.get('/api/settings/payroll-policies')),
   payConfigurations: () =>
     unwrap<EmployeePayConfiguration[]>(api.get('/api/settings/pay-configurations')),
 

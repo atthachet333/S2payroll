@@ -187,6 +187,7 @@ export const adjustableFieldSchema = z.enum([
   'loanDeduction',
   'otherDeduction',
   'lateDeduction',
+  'leaveDeduction',
   'absenceDeduction',
   'socialSecurity',
   'tax',
@@ -239,7 +240,9 @@ export const reportQuerySchema = z.object({
   to: dateString.optional(),
   departmentId: z.string().uuid().optional(),
   employeeId: z.string().uuid().optional(),
-  format: z.enum(['json', 'csv', 'excel']).default('json'),
+  employmentType: employmentTypeSchema.optional(),
+  status: payrollEmployeeStatusSchema.optional(),
+  format: z.enum(['json', 'csv', 'excel', 'pdf']).default('json'),
 });
 
 // --- settings ----------------------------------------------------------------
@@ -332,6 +335,42 @@ export const payProfileSchema = z.object({
       message: value.payType === 'MONTHLY' ? 'กรุณาระบุเงินเดือนที่มากกว่า 0' : 'กรุณาระบุอัตราค่าจ้างต่อชั่วโมงที่มากกว่า 0',
     });
   }
+});
+
+/**
+ * Per-employee payroll policy. Every field is optional and nullable: omitting
+ * one leaves it untouched, and sending null clears it back to "use the company
+ * default". A 0 is a real value meaning "deduct nothing" and is preserved.
+ */
+export const employeePayrollPolicySchema = z.object({
+  lateDeductionType: z.enum(['NONE', 'PER_HOUR_FROM_BASE', 'FIXED_AMOUNT']).nullish(),
+  lateDeductionAmount: decimalString.nullish(),
+  leaveDeductionType: z.enum(['NONE', 'PER_DAY_FROM_BASE', 'FIXED_AMOUNT']).nullish(),
+  leaveDeductionAmount: decimalString.nullish(),
+  absenceDeductionType: z.enum(['NONE', 'PER_DAY_FROM_BASE', 'FIXED_AMOUNT']).nullish(),
+  absenceDeductionAmount: decimalString.nullish(),
+  socialSecurityAmount: decimalString.nullish(),
+  taxAmount: decimalString.nullish(),
+  note: z.string().trim().max(500).nullish(),
+});
+
+/** Bringing a deactivated employee back. The return date is never defaulted. */
+export const reactivateEmployeeSchema = z.object({
+  returnDate: dateString,
+  reason: z.string().trim().max(500).nullish(),
+});
+
+/**
+ * A hand-authored attendance day. HR supplies only observed facts - the date and
+ * the punches. Worked, late and OT minutes are derived by the backend and are
+ * deliberately absent from this schema.
+ */
+export const manualAttendanceSchema = z.object({
+  workDate: dateString,
+  checkIn: z.string().trim().max(32).nullish(),
+  checkOut: z.string().trim().max(32).nullish(),
+  reason: z.string().trim().min(3, 'กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร').max(500),
+  note: z.string().trim().max(500).nullish(),
 });
 
 export const workScheduleProfileSchema = z.object({

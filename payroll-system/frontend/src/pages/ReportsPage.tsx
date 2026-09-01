@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Download, FileSpreadsheet, FileText, Printer } from 'lucide-react';
+import { Download, Eye, FileSpreadsheet, FileText, Printer } from 'lucide-react';
 import dayjs from 'dayjs';
 import { payrollApi, reportApi, settingsApi } from '@/services/endpoints';
 import { apiErrorMessage, downloadFile } from '@/services/api';
@@ -9,6 +9,8 @@ import {
   Button,
   Card,
   CardContent,
+  Dialog,
+  DialogContent,
   EmptyState,
   ErrorState,
   Field,
@@ -24,15 +26,15 @@ interface ReportDefinition {
   label: string;
   description: string;
   /** Which filter controls this report actually uses. */
-  filters: ('period' | 'dateRange' | 'department' | 'employee')[];
+  filters: ('period' | 'dateRange' | 'department' | 'employee' | 'employmentType' | 'status')[];
 }
 
 const REPORTS: ReportDefinition[] = [
   {
     type: 'payroll-summary',
-    label: 'สรุปเงินเดือน',
-    description: 'รายละเอียดเงินเดือนรายบุคคลของรอบที่เลือก',
-    filters: ['period', 'department'],
+    label: 'รายงานเงินเดือนแบบละเอียด',
+    description: 'รายได้ รายการหัก การลงเวลา และยอดสุทธิรายบุคคล',
+    filters: ['period', 'department', 'employmentType', 'status'],
   },
   {
     type: 'attendance-summary',
@@ -76,6 +78,9 @@ export default function ReportsPage() {
   const [selected, setSelected] = React.useState<ReportDefinition>(REPORTS[0]);
   const [periodId, setPeriodId] = React.useState('');
   const [departmentId, setDepartmentId] = React.useState('');
+  const [employmentType, setEmploymentType] = React.useState('');
+  const [status, setStatus] = React.useState('');
+  const [detailRow, setDetailRow] = React.useState<Record<string, string | number> | null>(null);
   const [from, setFrom] = React.useState(dayjs().startOf('month').format('YYYY-MM-DD'));
   const [to, setTo] = React.useState(dayjs().endOf('month').format('YYYY-MM-DD'));
   const [downloading, setDownloading] = React.useState<string | null>(null);
@@ -98,23 +103,25 @@ export default function ReportsPage() {
     const p: Record<string, string> = {};
     if (selected.filters.includes('period') && periodId) p.periodId = periodId;
     if (selected.filters.includes('department') && departmentId) p.departmentId = departmentId;
+    if (selected.filters.includes('employmentType') && employmentType) p.employmentType = employmentType;
+    if (selected.filters.includes('status') && status) p.status = status;
     if (selected.filters.includes('dateRange')) {
       p.from = from;
       p.to = to;
     }
     return p;
-  }, [selected, periodId, departmentId, from, to]);
+  }, [selected, periodId, departmentId, employmentType, status, from, to]);
 
   const query = useQuery({
     queryKey: ['report', selected.type, params],
     queryFn: () => reportApi.get(selected.type, params),
   });
 
-  const download = async (format: 'csv' | 'excel') => {
+  const download = async (format: 'csv' | 'excel' | 'pdf') => {
     setDownloading(format);
     try {
       const search = new URLSearchParams({ ...params, format }).toString();
-      const ext = format === 'csv' ? 'csv' : 'xlsx';
+      const ext = format === 'excel' ? 'xlsx' : format;
       await downloadFile(
         `/api/reports/${selected.type}?${search}`,
         `${selected.type}-${dayjs().format('YYYYMMDD-HHmm')}.${ext}`
@@ -128,6 +135,16 @@ export default function ReportsPage() {
   };
 
   const report = query.data;
+  const previewColumns = report?.kind === 'detailed-payroll'
+    ? report.columns.filter((column) => ['employee_code', 'employee_name', 'employment_type', 'present_days', 'worked_hours', 'late_count', 'leave_days', 'absent_days', 'gross_income', 'total_deduction', 'net_salary'].includes(column.key))
+    : report?.columns ?? [];
+  const displayValue = (key: string, value: string | number | undefined) => {
+    if (value === undefined || value === '') return '-';
+    const column = report?.columns.find((item) => item.key === key);
+    return column?.format === 'currency'
+      ? Number(value).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : value;
+  };
 
   return (
     <div>
@@ -205,6 +222,23 @@ export default function ReportsPage() {
                   </Select>
                 </Field>
               )}
+              {selected.filters.includes('employmentType') && (
+                <Field label="ประเภทพนักงาน">
+                  <Select value={employmentType} onChange={(e) => setEmploymentType(e.target.value)}>
+                    <option value="">ทุกประเภท</option>
+                    <option value="MONTHLY">รายเดือน</option><option value="DAILY">รายวัน</option>
+                    <option value="HOURLY">รายชั่วโมง</option><option value="CONTRACT">สัญญาจ้าง</option>
+                  </Select>
+                </Field>
+              )}
+              {selected.filters.includes('status') && (
+                <Field label="สถานะการคำนวณ">
+                  <Select value={status} onChange={(e) => setStatus(e.target.value)}>
+                    <option value="">ทุกสถานะ</option>
+                    {['PENDING', 'CALCULATED', 'REVIEW', 'APPROVED', 'PAID'].map((item) => <option key={item} value={item}>{item}</option>)}
+                  </Select>
+                </Field>
+              )}
 
               <div className="flex items-end gap-2 md:col-start-4 md:justify-end">
                 <Button
@@ -225,7 +259,7 @@ export default function ReportsPage() {
                   <Download className="h-4 w-4" />
                   CSV
                 </Button>
-                <Button variant="outline" size="sm" onClick={() => window.print()}>
+                <Button variant="outline" size="sm" onClick={() => void download('pdf')} loading={downloading === 'pdf'}>
                   <Printer className="h-4 w-4" />
                   PDF
                 </Button>
@@ -257,32 +291,44 @@ export default function ReportsPage() {
                       .join('  ·  ')}
                   </p>
                 </CardContent>
+                {report.summary && (
+                  <div className="grid gap-3 border-b border-border p-4 sm:grid-cols-2 xl:grid-cols-4">
+                    {[
+                      ['พนักงาน', `${report.summary.employeeCount.toLocaleString('th-TH')} คน`],
+                      ['รายได้รวม', Number(report.summary.grossTotal).toLocaleString('th-TH', { minimumFractionDigits: 2 })],
+                      ['รายการหักรวม', Number(report.summary.deductionTotal).toLocaleString('th-TH', { minimumFractionDigits: 2 })],
+                      ['เงินสุทธิ', Number(report.summary.netTotal).toLocaleString('th-TH', { minimumFractionDigits: 2 })],
+                    ].map(([label, value]) => <div key={label} className="rounded-lg bg-secondary/60 p-3"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{value}</p></div>)}
+                  </div>
+                )}
                 <div className="overflow-x-auto">
                   <table className="data-table">
                     <thead>
                       <tr>
-                        {report.columns.map((col) => (
+                        {previewColumns.map((col) => (
                           <th key={col.key} className={col.numeric ? 'text-right' : undefined}>
                             {col.header}
                           </th>
                         ))}
+                        {report.kind === 'detailed-payroll' && <th className="w-12"><span className="sr-only">รายละเอียด</span></th>}
                       </tr>
                     </thead>
                     <tbody>
                       {report.rows.map((row, i) => (
                         <tr key={i}>
-                          {report.columns.map((col) => (
+                          {previewColumns.map((col) => (
                             <td key={col.key} className={col.numeric ? 'num' : undefined}>
-                              {row[col.key] ?? '-'}
+                              {displayValue(col.key, row[col.key])}
                             </td>
                           ))}
+                          {report.kind === 'detailed-payroll' && <td><Button variant="ghost" size="sm" onClick={() => setDetailRow(row)} aria-label="ดูรายละเอียด"><Eye className="h-4 w-4" /></Button></td>}
                         </tr>
                       ))}
                     </tbody>
                     {report.totals && (
                       <tfoot>
                         <tr className="border-t-2 border-border bg-secondary/60 font-semibold">
-                          {report.columns.map((col) => (
+                          {previewColumns.map((col) => (
                             <td
                               key={col.key}
                               className={cn('px-3 py-2.5', col.numeric && 'num')}
@@ -303,6 +349,13 @@ export default function ReportsPage() {
           </Card>
         </div>
       </div>
+      <Dialog open={Boolean(detailRow)} onOpenChange={(open) => !open && setDetailRow(null)}>
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto" title="รายละเอียดเงินเดือนรายบุคคล" description={detailRow ? `${detailRow.employee_code} · ${detailRow.employee_name}` : undefined}>
+          <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
+            {report?.columns.map((column) => <div key={column.key} className="border-b border-border pb-2"><p className="text-xs text-muted-foreground">{column.header}</p><p className={cn('mt-1 text-sm', column.numeric && 'text-right tabular-nums')}>{displayValue(column.key, detailRow?.[column.key])}</p></div>)}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

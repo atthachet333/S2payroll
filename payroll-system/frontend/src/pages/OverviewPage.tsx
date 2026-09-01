@@ -1,13 +1,10 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -25,9 +22,11 @@ import {
   PageHeader,
   Skeleton,
   StatCard,
+  Select,
 } from '@/components/ui';
 import { PeriodStatusBadge } from '@/components/StatusBadge';
-import { formatDate, formatHours, formatMoney, formatMoneyCompact, formatNumber } from '@/utils/format';
+import { formatDate, formatHours, formatMoney, formatNumber } from '@/utils/format';
+import PayrollTrendChart from '@/features/overview/PayrollTrendChart';
 
 /**
  * Overview deliberately shows aggregates only - headline counters, the payroll
@@ -35,9 +34,10 @@ import { formatDate, formatHours, formatMoney, formatMoneyCompact, formatNumber 
  * live on their own pages.
  */
 export default function OverviewPage() {
+  const [trendMonths, setTrendMonths] = useState(6);
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['overview'],
-    queryFn: () => overviewApi.get(),
+    queryKey: ['overview', trendMonths],
+    queryFn: () => overviewApi.get(undefined, trendMonths),
     refetchInterval: POLL_INTERVAL_MS.overview,
     placeholderData: (previous) => previous,
   });
@@ -145,58 +145,21 @@ export default function OverviewPage() {
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Monthly payroll trend */}
         <Card className="lg:col-span-2">
-          <CardHeader>
+          <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle>แนวโน้มเงินเดือนรายเดือน</CardTitle>
+            <Select
+              aria-label="ช่วงเวลาแนวโน้มเงินเดือน"
+              className="h-8 w-28 text-xs"
+              value={String(trendMonths)}
+              onChange={(event) => setTrendMonths(Number(event.target.value))}
+            >
+              <option value="3">3 เดือน</option>
+              <option value="6">6 เดือน</option>
+              <option value="12">12 เดือน</option>
+            </Select>
           </CardHeader>
           <CardContent>
-            {trend.length === 0 ? (
-              <p className="py-16 text-center text-sm text-muted-foreground">
-                ยังไม่มีข้อมูลรอบเงินเดือนสำหรับแสดงแนวโน้ม
-              </p>
-            ) : (
-              <ResponsiveContainer width="100%" height={280}>
-                <LineChart data={trend} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: '#64748b' }} tickLine={false} axisLine={false} />
-                  <YAxis
-                    tick={{ fontSize: 12, fill: '#64748b' }}
-                    tickLine={false}
-                    axisLine={false}
-                    tickFormatter={(v) => formatMoneyCompact(v)}
-                    width={60}
-                  />
-                  <Tooltip
-                    formatter={(value: number) => `${formatMoney(value)} บาท`}
-                    contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', fontSize: 13 }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Line
-                    type="monotone"
-                    dataKey="gross"
-                    name="รายได้รวม"
-                    stroke="#1e3a8a"
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="net"
-                    name="เงินสุทธิ"
-                    stroke="#16a34a"
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="ot"
-                    name="ค่า OT"
-                    stroke="#ea580c"
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
+            <PayrollTrendChart trend={trend} />
           </CardContent>
         </Card>
 

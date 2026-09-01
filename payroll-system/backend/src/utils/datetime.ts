@@ -180,3 +180,22 @@ const THAI_MONTHS = [
 /** Human label for a payroll period, e.g. "พฤษภาคม 2027". */
 export const thaiMonthLabel = (year: number, month: number): string =>
   `${THAI_MONTHS[month - 1] ?? month} ${year}`;
+
+/** Abbreviated Thai months, for axis ticks where the full name will not fit. */
+const THAI_MONTHS_SHORT = [
+  'ม.ค.',
+  'ก.พ.',
+  'มี.ค.',
+  'เม.ย.',
+  'พ.ค.',
+  'มิ.ย.',
+  'ก.ค.',
+  'ส.ค.',
+  'ก.ย.',
+  'ต.ค.',
+  'พ.ย.',
+  'ธ.ค.',
+];
+
+export const thaiMonthShortLabel = (year: number, month: number): string =>
+  `${THAI_MONTHS_SHORT[month - 1] ?? month} ${year}`;

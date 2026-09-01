@@ -6,6 +6,9 @@ import { payrollApi } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
 import { useAuth } from '@/features/auth/AuthContext';
 import PayslipDocument from '@/features/payslips/PayslipDocument';
+import PayslipEditDialog from '@/features/payroll/PayslipEditDialog';
+import { payslipApi } from '@/services/endpoints';
+import { downloadFile } from '@/services/api';
 import {
   Badge,
   Button,
@@ -24,7 +27,7 @@ import {
   Textarea,
 } from '@/components/ui';
 import { PayrollEmployeeStatusBadge, EMPLOYMENT_TYPE_LABELS } from '@/components/StatusBadge';
-import { formatDateTime, formatMoney, formatNumber } from '@/utils/format';
+import { formatDateTime, formatMinutes, formatMoney, formatNumber } from '@/utils/format';
 
 /** Money fields payroll staff may override by hand, mirroring the backend allow-list. */
 const ADJUSTABLE_FIELDS: { value: string; label: string; kind: 'income' | 'deduction' }[] = [
@@ -36,6 +39,7 @@ const ADJUSTABLE_FIELDS: { value: string; label: string; kind: 'income' | 'deduc
   { value: 'loanDeduction', label: 'หักเงินกู้', kind: 'deduction' },
   { value: 'otherDeduction', label: 'หักอื่น ๆ', kind: 'deduction' },
   { value: 'lateDeduction', label: 'หักมาสาย', kind: 'deduction' },
+  { value: 'leaveDeduction', label: 'หักลา', kind: 'deduction' },
   { value: 'absenceDeduction', label: 'หักขาดงาน', kind: 'deduction' },
   { value: 'socialSecurity', label: 'ประกันสังคม', kind: 'deduction' },
   { value: 'tax', label: 'ภาษีหัก ณ ที่จ่าย', kind: 'deduction' },
@@ -44,17 +48,17 @@ const ADJUSTABLE_FIELDS: { value: string; label: string; kind: 'income' | 'deduc
 export default function PayrollEmployeeDrawer({
   periodId,
   employeeId,
-  locked,
+  editable,
   onClose,
 }: {
   periodId: string;
   employeeId: string | null;
-  locked: boolean;
+  editable: boolean;
   onClose: () => void;
 }) {
   const { can } = useAuth();
   const queryClient = useQueryClient();
-  const canEdit = can('payroll:write') && !locked;
+  const canEdit = can('payroll:write') && editable;
 
   const [field, setField] = React.useState(ADJUSTABLE_FIELDS[0].value);
   const [value, setValue] = React.useState('');
@@ -67,6 +71,8 @@ export default function PayrollEmployeeDrawer({
     queryFn: () => payrollApi.getEmployee(periodId, employeeId!),
     enabled: Boolean(employeeId),
   });
+
+  const [editOpen, setEditOpen] = React.useState(false);
 
   const previewQuery = useQuery({
     queryKey: ['payslip-preview', periodId, employeeId],
@@ -139,9 +145,12 @@ export default function PayrollEmployeeDrawer({
                 <PayrollEmployeeStatusBadge status={row.status} />
                 {row.hasAdjustment && <Badge variant="info">มีการปรับปรุงด้วยมือ</Badge>}
                 <div className="ml-auto flex gap-2">
+                  {/* Available at every workflow status: the preview is built
+                      from this calculated payroll row, not from a persisted
+                      payslip, so it never waits on approval or payment. */}
                   <Button variant="outline" size="sm" onClick={() => setPrintOpen(true)}>
                     <FileText className="h-4 w-4" />
-                    ดูสลิป
+                    ดูสลิปเงินเดือน
                   </Button>
                   {canEdit && row.status !== 'READY' && (
                     <Button
@@ -213,9 +222,142 @@ export default function PayrollEmployeeDrawer({
                     )}
                   </Section>
 
+                  {/* No wage rate, so no salary. The amounts below are worked
+                      time only and the drawer says so before showing any of
+                      them, rather than letting a 0 read as a settled figure. */}
+                  {!row.payConfigured && (
+                    <div className="rounded-lg border border-warning/30 bg-warning-soft/60 px-3.5 py-3 text-sm text-warning-fg">
+                      <p className="font-medium">ยังไม่ได้กำหนดอัตราค่าจ้าง</p>
+                      <p className="mt-0.5">
+                        ระบบแสดงเวลาทำงานจริงของพนักงานคนนี้ แต่ยังไม่คิดเป็นเงิน
+                        ยอดสุทธิด้านล่างจึงยังไม่ใช่ค่าจ้างที่ต้องจ่าย
+                      </p>
+                    </div>
+                  )}
+                  {row.payConfigured && row.isEstimate && (
+                    <div className="rounded-lg border border-info/30 bg-info/10 px-3.5 py-3 text-sm text-info">
+                      <p className="font-medium">ประมาณการ</p>
+                      <p className="mt-0.5">
+                        ยอดนี้คำนวณจากข้อมูลเท่าที่มีอยู่ และจะยังเปลี่ยนได้จนกว่ารอบจะสิ้นสุด
+                      </p>
+                    </div>
+                  )}
+
+                  {/* The bases the deductions were priced against. For a monthly
+                      employee, 18,000 / 30 = 600 a day and 600 / 8 = 75 an hour. */}
+                  <Section title="ฐานค่าจ้าง">
+                    <div className="divide-y divide-border/70">
+                      {(row.employmentType === 'MONTHLY' || row.employmentType === 'CONTRACT') && (
+                        <>
+                          <InfoRow
+                            label="เงินเดือนพื้นฐาน"
+                            value={`${formatMoney(row.baseSalary)} บาท / เดือน`}
+                          />
+                          <InfoRow label="ฐานต่อวัน" value={`${formatMoney(row.dailyBase)} บาท`} />
+                          <InfoRow
+                            label="ฐานต่อชั่วโมง"
+                            value={`${formatMoney(row.hourlyBase)} บาท`}
+                          />
+                          {/* Observed, floored and charged are three distinct
+                              facts. Collapsing them would leave HR unable to
+                              see why 16 minutes late cost a whole hour. */}
+                          {row.lateMinutes > 0 && (
+                            <>
+                              <InfoRow
+                                label="สายจริง"
+                                value={`${formatNumber(row.lateMinutes)} นาที`}
+                              />
+                              <InfoRow
+                                label="สายหลังปัด"
+                                value={`${formatNumber(row.roundedLateMinutes)} นาที`}
+                              />
+                              <InfoRow
+                                label="ชั่วโมงที่ใช้หัก"
+                                value={`${formatNumber(row.lateDeductionHours)} ชั่วโมง`}
+                              />
+                            </>
+                          )}
+                          {row.earlyLeaveMinutes > 0 && (
+                            <>
+                              <InfoRow
+                                label="ออกก่อนเวลาจริง"
+                                value={`${formatNumber(row.earlyLeaveMinutes)} นาที`}
+                              />
+                              <InfoRow
+                                label="ออกก่อนหลังปัด"
+                                value={`${formatNumber(row.roundedEarlyLeaveMinutes)} นาที`}
+                              />
+                            </>
+                          )}
+                        </>
+                      )}
+                      {(row.employmentType === 'DAILY' || row.employmentType === 'HOURLY') && (
+                        <>
+                          <InfoRow
+                            label="อัตราค่าจ้าง"
+                            value={
+                              row.payConfigured
+                                ? `${formatMoney(row.hourlyBase)} บาท / ชั่วโมง`
+                                : 'ยังไม่ได้กำหนด'
+                            }
+                          />
+                          {/* Actual and paid time are shown as separate lines
+                              on purpose: a day past eight hours loses an unpaid
+                              break and the remainder is floored to 15 minutes,
+                              so the two figures genuinely differ and the
+                              payslip has to be able to explain why. */}
+                          <InfoRow
+                            label="เวลาทำงานจริง"
+                            value={formatMinutes(Math.round(Number(row.workingHours) * 60))}
+                          />
+                          {row.breakDeductionMinutes > 0 && (
+                            <>
+                              <InfoRow
+                                label="หักเวลาพัก"
+                                value={formatMinutes(row.breakDeductionMinutes)}
+                              />
+                              <InfoRow
+                                label="หลังหักพัก"
+                                value={formatMinutes(
+                                  Math.round(Number(row.workingHours) * 60) -
+                                    row.breakDeductionMinutes
+                                )}
+                              />
+                            </>
+                          )}
+                          {/* Rows calculated before payable time was recorded
+                              carry 0, which is not "no paid time" but "not yet
+                              derived". Showing the line only when it has a
+                              value avoids stating a false zero; recalculating
+                              the period fills it in. */}
+                          {row.roundedAwayMinutes > 0 && (
+                            <InfoRow
+                              label="ปัดเวลาออก"
+                              value={`${formatNumber(row.roundedAwayMinutes)} นาที`}
+                            />
+                          )}
+                          {row.payableMinutes > 0 && (
+                            <InfoRow
+                              label="เวลาที่ใช้คิดค่าจ้าง"
+                              value={formatMinutes(row.payableMinutes)}
+                            />
+                          )}
+                          <InfoRow label="จำนวนวันที่มาทำงาน" value={`${formatNumber(row.presentDays)} วัน`} />
+                        </>
+                      )}
+                    </div>
+                  </Section>
+
                   <Section title="รายได้">
                     <div className="divide-y divide-border/70">
-                      <InfoRow label="เงินเดือนพื้นฐาน" value={formatMoney(row.baseSalary)} />
+                      <InfoRow
+                        label={
+                          row.employmentType === 'DAILY' || row.employmentType === 'HOURLY'
+                            ? 'ค่าจ้างตามเวลาทำงาน'
+                            : 'เงินเดือนพื้นฐาน'
+                        }
+                        value={row.payConfigured ? formatMoney(row.baseSalary) : 'ยังไม่ได้กำหนด'}
+                      />
                       <InfoRow label="ค่าล่วงเวลา" value={formatMoney(row.otAmount)} />
                       <InfoRow label="เบี้ยเลี้ยง" value={formatMoney(row.allowanceAmount)} />
                       <InfoRow label="โบนัส" value={formatMoney(row.bonusAmount)} />
@@ -231,8 +373,33 @@ export default function PayrollEmployeeDrawer({
 
                   <Section title="รายการหัก">
                     <div className="divide-y divide-border/70">
-                      <InfoRow label="หักมาสาย" value={formatMoney(row.lateDeduction)} />
-                      <InfoRow label="หักขาดงาน" value={formatMoney(row.absenceDeduction)} />
+                      {/* The minutes are the observed fact and the hours are the
+                          chargeable quantity; both are shown so the amount can
+                          be audited against the attendance record. */}
+                      <InfoRow
+                        label={
+                          row.lateMinutes > 0
+                            ? `หักมาสาย (สาย ${formatNumber(row.lateMinutes)} นาที · คิด ${formatNumber(row.lateDeductionHours)} ชั่วโมง)`
+                            : 'หักมาสาย'
+                        }
+                        value={formatMoney(row.lateDeduction)}
+                      />
+                      <InfoRow
+                        label={
+                          Number(row.unpaidLeaveDays) > 0
+                            ? `หักลา (${formatNumber(row.unpaidLeaveDays, 2)} วันไม่รับค่าจ้าง)`
+                            : 'หักลา'
+                        }
+                        value={formatMoney(row.leaveDeduction)}
+                      />
+                      <InfoRow
+                        label={
+                          row.absentDays > 0
+                            ? `หักขาดงาน (ขาด ${formatNumber(row.absentDays)} วัน)`
+                            : 'หักขาดงาน'
+                        }
+                        value={formatMoney(row.absenceDeduction)}
+                      />
                       <InfoRow label="ประกันสังคม" value={formatMoney(row.socialSecurity)} />
                       <InfoRow label="ภาษีหัก ณ ที่จ่าย" value={formatMoney(row.tax)} />
                       <InfoRow label="หักเงินกู้" value={formatMoney(row.loanDeduction)} />
@@ -246,7 +413,14 @@ export default function PayrollEmployeeDrawer({
                   </Section>
 
                   <div className="flex items-center justify-between rounded-xl bg-primary px-5 py-4 text-primary-foreground">
-                    <span className="text-sm font-medium">เงินเดือนสุทธิ</span>
+                    <span className="text-sm font-medium">
+                      {row.payConfigured ? 'เงินเดือนสุทธิ' : 'ยอดที่คำนวณได้ (ยังไม่ใช่ยอดสุทธิ)'}
+                      {row.payConfigured && row.isEstimate && (
+                        <span className="ml-2 rounded bg-primary-foreground/20 px-1.5 py-0.5 text-xs">
+                          ประมาณการ
+                        </span>
+                      )}
+                    </span>
                     <span className="text-2xl font-semibold tabular-nums">
                       {formatMoney(row.netSalary)} <span className="text-sm font-normal">บาท</span>
                     </span>
@@ -369,6 +543,24 @@ export default function PayrollEmployeeDrawer({
         onOpenChange={setPrintOpen}
         snapshot={previewQuery.data ?? null}
         loading={previewQuery.isLoading}
+        error={previewQuery.isError ? apiErrorMessage(previewQuery.error) : null}
+        onRetry={() => void previewQuery.refetch()}
+        // Downloading the canonical PDF needs an issued payslip; before that
+        // this is a live preview, and the browser print is the way to paper.
+        onDownloadPdf={
+          row?.payslip
+            ? () => void downloadFile(payslipApi.pdfPath(row.payslip!.id), `${row.payslip!.payslipNo}.pdf`)
+            : undefined
+        }
+        onEdit={canEdit ? () => { setPrintOpen(false); setEditOpen(true); } : undefined}
+      />
+
+      <PayslipEditDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        periodId={periodId}
+        row={row ?? null}
+        onSaved={() => setPrintOpen(true)}
       />
     </>
   );

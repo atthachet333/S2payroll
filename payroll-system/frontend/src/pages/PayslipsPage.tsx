@@ -1,9 +1,10 @@
 import * as React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Banknote, Eye, Printer } from 'lucide-react';
+import { Banknote, Download, Eye, Printer } from 'lucide-react';
 import { payrollApi, payslipApi } from '@/services/endpoints';
-import { apiErrorMessage } from '@/services/api';
+import { apiErrorMessage, downloadFile } from '@/services/api';
+import { toast } from 'sonner';
 import PayslipDocument from '@/features/payslips/PayslipDocument';
 import {
   Button,
@@ -26,6 +27,24 @@ export default function PayslipsPage() {
   const [periodId, setPeriodId] = React.useState('');
   const [search, setSearch] = React.useState(searchParams.get('search') ?? '');
   const [viewing, setViewing] = React.useState<Payslip | null>(null);
+  const [downloadingId, setDownloadingId] = React.useState<string | null>(null);
+
+  /**
+   * The canonical download is the server-rendered PDF, not a browser print.
+   * It is generated from the stored snapshot and re-verified against the
+   * payroll row before a byte is sent, so it cannot state a total the payroll
+   * record disagrees with.
+   */
+  const downloadPdf = async (slip: Payslip) => {
+    setDownloadingId(slip.id);
+    try {
+      await downloadFile(payslipApi.pdfPath(slip.id), `${slip.payslipNo}.pdf`);
+    } catch (error) {
+      toast.error(apiErrorMessage(error));
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   React.useEffect(() => setPage(1), [periodId, search]);
 
@@ -117,12 +136,13 @@ export default function PayslipsPage() {
                         <div className="flex justify-end gap-1">
                           <Button variant="ghost" size="sm" onClick={() => setViewing(slip)}>
                             <Eye className="h-4 w-4" />
-                            ดู
+                            ดูสลิป
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
                             aria-label="พิมพ์"
+                            title="พิมพ์"
                             onClick={() => {
                               setViewing(slip);
                               // Let the dialog paint before opening the print sheet.
@@ -130,6 +150,16 @@ export default function PayslipsPage() {
                             }}
                           >
                             <Printer className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label="ดาวน์โหลด PDF"
+                            title="ดาวน์โหลด PDF"
+                            loading={downloadingId === slip.id}
+                            onClick={() => void downloadPdf(slip)}
+                          >
+                            <Download className="h-4 w-4" />
                           </Button>
                         </div>
                       </td>
@@ -154,6 +184,9 @@ export default function PayslipsPage() {
         open={Boolean(viewing)}
         onOpenChange={(open) => !open && setViewing(null)}
         snapshot={viewing?.snapshot ?? null}
+        downloading={downloadingId === viewing?.id}
+        onEdit={undefined}
+        onDownloadPdf={viewing ? () => void downloadPdf(viewing) : undefined}
       />
     </div>
   );

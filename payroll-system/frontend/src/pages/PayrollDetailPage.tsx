@@ -19,6 +19,7 @@ import { useAuth } from '@/features/auth/AuthContext';
 import PayrollEmployeeDrawer from '@/features/payroll/PayrollEmployeeDrawer';
 import FinalReviewDialog from '@/features/payroll/FinalReviewDialog';
 import PrePayrollCheckDialog from '@/features/payroll/PrePayrollCheckDialog';
+import PayrollCharts from '@/features/payroll/PayrollCharts';
 import {
   Button,
   Card,
@@ -35,10 +36,27 @@ import {
   TableSkeleton,
   Textarea,
 } from '@/components/ui';
-import { PayrollEmployeeStatusBadge, PeriodStatusBadge } from '@/components/StatusBadge';
+import {
+  EMPLOYMENT_TYPE_LABELS,
+  PayrollEmployeeStatusBadge,
+  PeriodStatusBadge,
+} from '@/components/StatusBadge';
 import { formatDate, formatMoney, formatNumber } from '@/utils/format';
 import { cn } from '@/utils/cn';
-import type { PayrollPeriodStatus } from '@/types';
+import type { PayrollEmployee, PayrollPeriodStatus } from '@/types';
+
+/**
+ * The wage basis a row was calculated from: a monthly employee's derived daily
+ * base, or an hourly employee's rate. Blank when no rate was configured, rather
+ * than a zero that could be mistaken for one.
+ */
+function payBasis(row: PayrollEmployee): string {
+  if (!row.payConfigured) return '-';
+  if (row.employmentType === 'MONTHLY' || row.employmentType === 'CONTRACT') {
+    return `${formatMoney(row.dailyBase)} / วัน`;
+  }
+  return `${formatMoney(row.hourlyBase)} / ชม.`;
+}
 
 type WorkflowAction =
   | 'attendance-review'
@@ -292,11 +310,17 @@ export default function PayrollDetailPage() {
     },
   });
 
+  /**
+   * Calculation runs employee by employee, so it is no longer gated on the
+   * whole roster being ready. It goes straight through when everyone is ready;
+   * otherwise the readiness dialog opens first so the operator sees exactly who
+   * will be marked incomplete before they commit to the run.
+   */
   const calculateWhenReady = async () => {
     setCheckingReadiness(true);
     try {
       const report = await payrollApi.preCheck(periodId);
-      if (report.canCalculate) {
+      if (report.canCalculate && report.readiness.ready === report.readiness.employees) {
         actionMutation.mutate('calculate');
       } else {
         setPreCheckOpen(true);
@@ -412,10 +436,12 @@ export default function PayrollDetailPage() {
       )}
 
       {readinessQuery.data && (
-        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
           <StatCard label="พร้อมคำนวณ" value={`${readinessQuery.data.readiness.ready} คน`} tone="success" />
-          <StatCard label="ยังขาดค่าจ้าง" value={`${readinessQuery.data.readiness.missingPay} คน`} tone="warning" />
-          <StatCard label="ข้อมูลเวลาไม่ครบ" value={`${readinessQuery.data.readiness.incompleteAttendance} คน`} tone="danger" />
+          <StatCard label="คำนวณแล้ว" value={`${formatNumber(summary.employees)} คน`} tone="info" />
+          <StatCard label="ยังตั้งค่าไม่ครบ" value={`${readinessQuery.data.readiness.unconfigured} คน`} tone="warning" />
+          <StatCard label="เวลาไม่ครบ" value={`${readinessQuery.data.readiness.incompleteAttendance} คน`} tone="danger" />
+          <StatCard label="ถูกยกเว้น" value={`${readinessQuery.data.readiness.excluded} คน`} />
           <StatCard label="กำลังทำงานวันนี้" value={`${readinessQuery.data.readiness.inProgressToday} คน`} tone="info" />
         </div>
       )}
@@ -432,9 +458,16 @@ export default function PayrollDetailPage() {
         <StatCard label="รายการหักรวม" value={formatMoney(summary.deductionTotal)} tone="danger" />
         <StatCard label="เงินเดือนสุทธิรวม" value={formatMoney(summary.netTotal)} tone="success" />
         <StatCard label="พร้อมจ่าย" value={formatNumber(summary.ready)} tone="success" />
-        <StatCard label="ต้องตรวจสอบ" value={formatNumber(summary.needsReview)} tone="warning" />
-        <StatCard label="ข้อมูลไม่ครบ" value={formatNumber(summary.missingData)} tone="danger" />
+        <StatCard label="คำนวณบางส่วน" value={formatNumber(summary.partial)} tone="warning" />
+        <StatCard label="ยังไม่ได้กำหนดค่าจ้าง" value={formatNumber(summary.unconfigured)} tone="danger" />
+        <StatCard label="ข้อมูลเวลาไม่ครบ" value={formatNumber(summary.attendanceIncomplete)} tone="danger" />
       </div>
+
+      <PayrollCharts
+        summary={summary}
+        employees={periodEmployees}
+        rosterComplete={rosterComplete}
+      />
 
       {/* Filters */}
       <Card className="mb-4 p-4">
@@ -472,9 +505,12 @@ export default function PayrollDetailPage() {
             <Select value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">ทุกสถานะ</option>
               <option value="READY">พร้อมจ่าย</option>
-              <option value="NEEDS_REVIEW">ต้องตรวจสอบ</option>
-              <option value="MISSING_DATA">ข้อมูลไม่ครบ</option>
-              <option value="EXCLUDED">ไม่รวมในรอบนี้</option>
+              <option value="PARTIAL">คำนวณบางส่วน</option>
+              <option value="UNCONFIGURED">ยังไม่ได้กำหนดค่าจ้าง</option>
+              <option value="ATTENDANCE_INCOMPLETE">ข้อมูลเวลาไม่ครบ</option>
+              <option value="EXCLUDED">ถูกยกเว้น</option>
+              <option value="NEEDS_REVIEW">ต้องตรวจสอบ (ข้อมูลเดิม)</option>
+              <option value="MISSING_DATA">ข้อมูลไม่ครบ (ข้อมูลเดิม)</option>
             </Select>
           </Field>
         </div>
@@ -503,18 +539,16 @@ export default function PayrollDetailPage() {
                   <tr>
                     <th>รหัส</th>
                     <th>ชื่อ-นามสกุล</th>
-                    <th>แผนก</th>
-                    <th className="text-right">ชม.ทำงาน</th>
-                    <th className="text-right">ชม. OT</th>
-                    <th className="text-right">เงินเดือน</th>
-                    <th className="text-right">ค่า OT</th>
-                    <th className="text-right">เบี้ยเลี้ยง</th>
-                    <th className="text-right">โบนัส</th>
-                    <th className="text-right">ปกส.</th>
+                    <th>ประเภท</th>
+                    <th className="text-right">ฐานค่าจ้าง</th>
+                    <th className="text-right">ชั่วโมงทำงาน</th>
+                    <th className="text-right">ค่าจ้าง</th>
+                    <th className="text-right">หักสาย</th>
+                    <th className="text-right">หักลา</th>
+                    <th className="text-right">หักขาด</th>
+                    <th className="text-right">ประกันสังคม</th>
                     <th className="text-right">ภาษี</th>
-                    <th className="text-right">รวมหัก</th>
-                    <th className="text-right">รายได้รวม</th>
-                    <th className="text-right">เงินสุทธิ</th>
+                    <th className="text-right">รับสุทธิ</th>
                     <th>สถานะ</th>
                   </tr>
                 </thead>
@@ -526,19 +560,31 @@ export default function PayrollDetailPage() {
                       onClick={() => setSelectedEmployee(row.employeeId)}
                     >
                       <td className="font-medium">{row.employeeCode}</td>
-                      <td>{row.employeeName}</td>
-                      <td className="text-muted-foreground">{row.departmentName ?? '-'}</td>
-                      <td className="num">{formatNumber(row.workingHours, 1)}</td>
-                      <td className="num text-info">{formatNumber(row.otHours, 1)}</td>
-                      <td className="num">{formatMoney(row.baseSalary)}</td>
-                      <td className="num">{formatMoney(row.otAmount)}</td>
-                      <td className="num">{formatMoney(row.allowanceAmount)}</td>
-                      <td className="num">{formatMoney(row.bonusAmount)}</td>
+                      <td>
+                        {row.employeeName}
+                        <span className="block text-xs text-muted-foreground">
+                          {row.departmentName ?? '-'}
+                        </span>
+                      </td>
+                      <td className="text-muted-foreground">
+                        {EMPLOYMENT_TYPE_LABELS[row.employmentType]}
+                      </td>
+                      <td className="num text-muted-foreground">{payBasis(row)}</td>
+                      <td className="num">{formatNumber(row.workingHours, 2)}</td>
+                      {/* An unconfigured employee has real hours and no wage.
+                          Showing 0.00 here would read as a salary of zero, so
+                          the cell says what is actually true instead. */}
+                      <td className={cn('num', !row.payConfigured && 'text-warning')}>
+                        {row.payConfigured ? formatMoney(row.baseSalary) : 'ยังไม่ได้กำหนด'}
+                      </td>
+                      <td className="num text-danger">{formatMoney(row.lateDeduction)}</td>
+                      <td className="num text-danger">{formatMoney(row.leaveDeduction)}</td>
+                      <td className="num text-danger">{formatMoney(row.absenceDeduction)}</td>
                       <td className="num text-danger">{formatMoney(row.socialSecurity)}</td>
                       <td className="num text-danger">{formatMoney(row.tax)}</td>
-                      <td className="num text-danger">{formatMoney(row.totalDeduction)}</td>
-                      <td className="num">{formatMoney(row.grossIncome)}</td>
-                      <td className="num font-semibold">{formatMoney(row.netSalary)}</td>
+                      <td className={cn('num font-semibold', !row.payConfigured && 'text-warning')}>
+                        {row.payConfigured ? formatMoney(row.netSalary) : '—'}
+                      </td>
                       <td>
                         <PayrollEmployeeStatusBadge status={row.status} />
                       </td>
@@ -562,7 +608,7 @@ export default function PayrollDetailPage() {
       <PayrollEmployeeDrawer
         periodId={periodId}
         employeeId={selectedEmployee}
-        locked={locked}
+        editable={['DRAFT', 'ATTENDANCE_REVIEW', 'CALCULATED', 'REVIEW'].includes(period.status)}
         onClose={() => setSelectedEmployee(null)}
       />
 

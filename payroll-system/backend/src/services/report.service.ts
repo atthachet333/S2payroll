@@ -4,6 +4,7 @@ import { prisma } from '../plugins/prisma.js';
 import { dec, money } from '../utils/money.js';
 import { dayjs } from '../utils/datetime.js';
 import { notFound } from '../utils/errors.js';
+import { valueAttendanceRecords } from './attendance-valuation.service.js';
 
 export type ReportType =
   | 'payroll-summary'
@@ -19,14 +20,26 @@ export interface ReportColumn {
   header: string;
   width?: number;
   numeric?: boolean;
+  format?: 'currency' | 'number' | 'date';
 }
 
 export interface ReportData {
+  kind?: 'detailed-payroll' | 'attendance' | 'generic';
   title: string;
   columns: ReportColumn[];
   rows: Record<string, string | number>[];
   totals?: Record<string, string | number>;
   meta: Record<string, string>;
+  summary?: {
+    employeeCount: number;
+    monetaryEmployeeCount: number;
+    unconfiguredCount: number;
+    grossTotal: string;
+    deductionTotal: string;
+    netTotal: string;
+    workedHoursTotal: string;
+    otHoursTotal: string;
+  };
 }
 
 export interface ReportParams {
@@ -35,12 +48,85 @@ export interface ReportParams {
   to?: Date;
   departmentId?: string;
   employeeId?: string;
+  employmentType?: string;
+  status?: string;
 }
 
 async function requirePeriod(periodId: string) {
   const period = await prisma.payrollPeriod.findUnique({ where: { id: periodId } });
   if (!period) throw notFound('Payroll period');
   return period;
+}
+
+export type DetailedPayrollReportRow = Record<string, string | number> & {
+  period: string;
+  period_code: string;
+  employee_code: string;
+  employee_name: string;
+  department: string;
+  position: string;
+  employment_type: string;
+  calculation_status: string;
+  pay_basis: string;
+  pay_rate: string;
+  working_days: number;
+  present_days: number;
+  /** The true observed duration. Never the payable figure. */
+  worked_hours: string;
+  actual_worked_minutes: number;
+  /** DAILY only: the unpaid break removed, and the minutes actually paid for. */
+  break_deduction_minutes: number;
+  rounded_away_minutes: number;
+  payable_minutes: number;
+  payable_hours: string;
+  /** Lateness and early leave as observed, and after the company floor. */
+  actual_late_minutes: number;
+  rounded_late_minutes: number;
+  actual_early_leave_minutes: number;
+  rounded_early_leave_minutes: number;
+  /** Approved OT before and after the floor. Nothing here creates OT. */
+  approved_ot_actual_minutes: number;
+  approved_ot_payable_minutes: number;
+  ot_hours: string;
+  ot_minutes: number;
+  late_count: number;
+  late_minutes: number;
+  leave_days: string;
+  absent_days: number;
+  base_earnings: string;
+  ot_amount: string;
+  bonus: string;
+  allowance: string;
+  commission: string;
+  other_income: string;
+  gross_income: string;
+  late_deduction: string;
+  leave_deduction: string;
+  absence_deduction: string;
+  social_security: string;
+  tax: string;
+  other_deduction: string;
+  total_deduction: string;
+  net_salary: string;
+  _pay_configured: number;
+};
+
+export function summarizeDetailedPayrollRows(rows: DetailedPayrollReportRow[]) {
+  const monetary = rows.filter((row) => row._pay_configured === 1);
+  const sum = (key: keyof DetailedPayrollReportRow) =>
+    monetary.reduce((total, row) => total.plus(dec(row[key] as string | number)), dec(0));
+  const sumAll = (key: keyof DetailedPayrollReportRow) =>
+    rows.reduce((total, row) => total.plus(dec(row[key] as string | number)), dec(0));
+  return {
+    employeeCount: rows.length,
+    monetaryEmployeeCount: monetary.length,
+    unconfiguredCount: rows.length - monetary.length,
+    grossTotal: sum('gross_income').toFixed(2),
+    deductionTotal: sum('total_deduction').toFixed(2),
+    netTotal: sum('net_salary').toFixed(2),
+    workedHoursTotal: sumAll('worked_hours').toFixed(2),
+    otHoursTotal: sumAll('ot_hours').toFixed(2),
+  };
 }
 
 async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
@@ -50,66 +136,124 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
     where: {
       ...(period ? { periodId: period.id } : {}),
       ...(params.departmentId ? { employee: { departmentId: params.departmentId } } : {}),
+      ...(params.employmentType ? { employmentType: params.employmentType as any } : {}),
+      ...(params.status ? { status: params.status as any } : {}),
     },
-    orderBy: [{ employeeCode: 'asc' }],
+    include: { period: { select: { code: true, name: true, year: true, month: true } } },
+    orderBy: [{ period: { year: 'desc' } }, { period: { month: 'desc' } }, { employeeCode: 'asc' }],
   });
 
-  let gross = dec(0);
-  let net = dec(0);
-  let deduction = dec(0);
-  let ot = dec(0);
-
-  const data = rows.map((r) => {
-    gross = gross.plus(dec(r.grossIncome));
-    net = net.plus(dec(r.netSalary));
-    deduction = deduction.plus(dec(r.totalDeduction));
-    ot = ot.plus(dec(r.otAmount));
+  const data: DetailedPayrollReportRow[] = rows.map((r) => {
+    const hourly = r.employmentType === 'DAILY' || r.employmentType === 'HOURLY';
     return {
+      period: r.period.name,
+      period_code: r.period.code,
       employee_code: r.employeeCode,
       employee_name: r.employeeName,
       department: r.departmentName ?? '-',
-      working_hours: r.workingHours.toString(),
+      position: r.positionName ?? '-',
+      employment_type: r.employmentType,
+      calculation_status: r.status,
+      pay_basis: hourly ? 'อัตรารายชั่วโมง' : 'ฐานเงินเดือนรายเดือน',
+      pay_rate: money(hourly ? r.hourlyBase : r.baseSalary).toFixed(2),
+      working_days: r.workingDays,
+      present_days: r.presentDays,
+      // Actual and payable time are separate columns on purpose: an export that
+      // showed payable time under a "ชั่วโมงทำงาน" heading would misstate what
+      // the employee actually worked, and nobody reading the file would know.
+      worked_hours: r.workingHours.toString(),
+      actual_worked_minutes: Math.round(Number(r.workingHours) * 60),
+      break_deduction_minutes: r.breakDeductionMinutes,
+      rounded_away_minutes: r.roundedAwayMinutes,
+      payable_minutes: r.payableMinutes,
+      payable_hours: (r.payableMinutes / 60).toFixed(2),
+      actual_late_minutes: r.lateMinutes,
+      rounded_late_minutes: r.roundedLateMinutes,
+      actual_early_leave_minutes: r.earlyLeaveMinutes,
+      rounded_early_leave_minutes: r.roundedEarlyLeaveMinutes,
+      approved_ot_actual_minutes: r.actualOtMinutes,
+      approved_ot_payable_minutes: Math.round(Number(r.otHours) * 60),
       ot_hours: r.otHours.toString(),
-      base_salary: money(r.baseSalary).toFixed(2),
+      ot_minutes: Math.round(Number(r.otHours) * 60),
+      late_count: r.lateCount,
+      late_minutes: r.lateMinutes,
+      leave_days: r.leaveDays.toString(),
+      absent_days: r.absentDays,
+      base_earnings: money(r.baseSalary).toFixed(2),
       ot_amount: money(r.otAmount).toFixed(2),
-      allowance: money(r.allowanceAmount).toFixed(2),
       bonus: money(r.bonusAmount).toFixed(2),
+      allowance: money(r.allowanceAmount).toFixed(2),
+      commission: money(r.commissionAmount).toFixed(2),
+      other_income: money(r.otherIncome).toFixed(2),
+      gross_income: money(r.grossIncome).toFixed(2),
+      late_deduction: money(r.lateDeduction).toFixed(2),
+      leave_deduction: money(r.leaveDeduction).toFixed(2),
+      absence_deduction: money(r.absenceDeduction).toFixed(2),
       social_security: money(r.socialSecurity).toFixed(2),
       tax: money(r.tax).toFixed(2),
+      other_deduction: money(dec(r.loanDeduction).plus(r.otherDeduction)).toFixed(2),
       total_deduction: money(r.totalDeduction).toFixed(2),
-      gross_income: money(r.grossIncome).toFixed(2),
       net_salary: money(r.netSalary).toFixed(2),
-      status: r.status,
+      _pay_configured: r.payConfigured ? 1 : 0,
     };
   });
+  const summary = summarizeDetailedPayrollRows(data);
 
   return {
-    title: `สรุปเงินเดือน${period ? ` - ${period.name}` : ''}`,
+    kind: 'detailed-payroll',
+    title: `รายงานเงินเดือนแบบละเอียด${period ? ` - ${period.name}` : ''}`,
     columns: [
+      { key: 'period', header: 'รอบเงินเดือน', width: 18 },
       { key: 'employee_code', header: 'รหัสพนักงาน', width: 14 },
       { key: 'employee_name', header: 'ชื่อ-นามสกุล', width: 26 },
       { key: 'department', header: 'แผนก', width: 18 },
-      { key: 'working_hours', header: 'ชั่วโมงทำงาน', width: 14, numeric: true },
-      { key: 'ot_hours', header: 'ชั่วโมง OT', width: 12, numeric: true },
-      { key: 'base_salary', header: 'เงินเดือนพื้นฐาน', width: 16, numeric: true },
-      { key: 'ot_amount', header: 'ค่า OT', width: 14, numeric: true },
-      { key: 'allowance', header: 'เบี้ยเลี้ยง', width: 14, numeric: true },
-      { key: 'bonus', header: 'โบนัส', width: 14, numeric: true },
-      { key: 'social_security', header: 'ประกันสังคม', width: 14, numeric: true },
-      { key: 'tax', header: 'ภาษี', width: 14, numeric: true },
-      { key: 'total_deduction', header: 'รวมรายการหัก', width: 16, numeric: true },
-      { key: 'gross_income', header: 'รายได้รวม', width: 16, numeric: true },
-      { key: 'net_salary', header: 'เงินสุทธิ', width: 16, numeric: true },
-      { key: 'status', header: 'สถานะ', width: 14 },
+      { key: 'position', header: 'ตำแหน่ง', width: 18 },
+      { key: 'employment_type', header: 'ประเภทพนักงาน', width: 15 },
+      { key: 'calculation_status', header: 'สถานะการคำนวณ', width: 18 },
+      { key: 'pay_basis', header: 'ประเภทฐานค่าจ้าง', width: 18 },
+      { key: 'pay_rate', header: 'ฐานเงินเดือน / อัตราค่าจ้าง', width: 20, numeric: true, format: 'currency' },
+      { key: 'working_days', header: 'วันทำงานในรอบ', width: 14, numeric: true },
+      { key: 'present_days', header: 'วันที่มาทำงาน', width: 14, numeric: true },
+      { key: 'worked_hours', header: 'ชั่วโมงทำงานจริง', width: 16, numeric: true },
+      { key: 'break_deduction_minutes', header: 'นาทีพักที่หัก', width: 14, numeric: true },
+      { key: 'rounded_away_minutes', header: 'นาทีที่ปัดออก', width: 14, numeric: true },
+      { key: 'payable_hours', header: 'ชั่วโมงคิดค่าจ้าง', width: 16, numeric: true },
+      { key: 'approved_ot_actual_minutes', header: 'นาที OT จริง', width: 13, numeric: true },
+      { key: 'approved_ot_payable_minutes', header: 'นาที OT ที่คิดจ่าย', width: 16, numeric: true },
+      { key: 'ot_hours', header: 'ชั่วโมง OT ที่คิดจ่าย', width: 18, numeric: true },
+      { key: 'late_count', header: 'จำนวนครั้งมาสาย', width: 15, numeric: true },
+      { key: 'actual_late_minutes', header: 'นาทีมาสายจริง', width: 14, numeric: true },
+      { key: 'rounded_late_minutes', header: 'นาทีมาสายหลังปัด', width: 16, numeric: true },
+      { key: 'actual_early_leave_minutes', header: 'นาทีออกก่อนจริง', width: 15, numeric: true },
+      { key: 'rounded_early_leave_minutes', header: 'นาทีออกก่อนหลังปัด', width: 17, numeric: true },
+      { key: 'leave_days', header: 'วันลา', width: 10, numeric: true },
+      { key: 'absent_days', header: 'วันขาด', width: 10, numeric: true },
+      { key: 'base_earnings', header: 'รายได้พื้นฐาน', width: 16, numeric: true, format: 'currency' },
+      { key: 'ot_amount', header: 'ค่า OT', width: 14, numeric: true, format: 'currency' },
+      { key: 'bonus', header: 'โบนัส', width: 14, numeric: true, format: 'currency' },
+      { key: 'allowance', header: 'เบี้ยเลี้ยง', width: 14, numeric: true, format: 'currency' },
+      { key: 'commission', header: 'ค่าคอมมิชชั่น', width: 15, numeric: true, format: 'currency' },
+      { key: 'other_income', header: 'รายได้อื่น', width: 14, numeric: true, format: 'currency' },
+      { key: 'gross_income', header: 'รายได้รวม', width: 16, numeric: true, format: 'currency' },
+      { key: 'late_deduction', header: 'หักมาสาย', width: 14, numeric: true, format: 'currency' },
+      { key: 'leave_deduction', header: 'หักลา', width: 14, numeric: true, format: 'currency' },
+      { key: 'absence_deduction', header: 'หักขาด', width: 14, numeric: true, format: 'currency' },
+      { key: 'social_security', header: 'ประกันสังคม', width: 14, numeric: true, format: 'currency' },
+      { key: 'tax', header: 'ภาษี', width: 14, numeric: true, format: 'currency' },
+      { key: 'other_deduction', header: 'รายการหักอื่น', width: 16, numeric: true, format: 'currency' },
+      { key: 'total_deduction', header: 'รายการหักรวม', width: 16, numeric: true, format: 'currency' },
+      { key: 'net_salary', header: 'เงินสุทธิ', width: 16, numeric: true, format: 'currency' },
     ],
     rows: data,
     totals: {
-      employee_name: `รวม ${data.length} คน`,
-      ot_amount: ot.toFixed(2),
-      total_deduction: deduction.toFixed(2),
-      gross_income: gross.toFixed(2),
-      net_salary: net.toFixed(2),
+      employee_name: `รวม ${summary.employeeCount} คน`,
+      worked_hours: summary.workedHoursTotal,
+      ot_hours: summary.otHoursTotal,
+      total_deduction: summary.deductionTotal,
+      gross_income: summary.grossTotal,
+      net_salary: summary.netTotal,
     },
+    summary,
     meta: {
       period: period?.name ?? 'ทุกรอบ',
       generated_at: dayjs().format('YYYY-MM-DD HH:mm'),
@@ -147,8 +291,11 @@ async function attendanceReport(
       employee: {
         select: {
           employeeCode: true,
+          id: true,
           firstName: true,
           lastName: true,
+          employmentType: true,
+          attendanceRequired: true,
           department: { select: { name: true } },
         },
       },
@@ -156,75 +303,51 @@ async function attendanceReport(
     orderBy: [{ employeeCode: 'asc' }, { workDate: 'asc' }],
   });
 
-  if (variant === 'summary') {
-    // One row per employee with the period totals.
-    const byEmployee = new Map<
-      string,
+  const employeesById = new Map(
+    records.map((record) => [
+      record.employeeId,
       {
-        employee_code: string;
-        employee_name: string;
-        department: string;
-        present: number;
-        late: number;
-        absent: number;
-        leave: number;
-        missing: number;
-        worked_hours: number;
-        ot_hours: number;
-        late_minutes: number;
-      }
-    >();
+        id: record.employee.id,
+        employmentType: record.employee.employmentType,
+        attendanceRequired: record.employee.attendanceRequired,
+      },
+    ])
+  );
+  const dailyPay = await valueAttendanceRecords(records, employeesById);
 
-    for (const r of records) {
-      const key = r.employeeCode;
-      const entry =
-        byEmployee.get(key) ??
-        {
-          employee_code: r.employeeCode,
-          employee_name: `${r.employee.firstName} ${r.employee.lastName}`,
-          department: r.employee.department?.name ?? '-',
-          present: 0,
-          late: 0,
-          absent: 0,
-          leave: 0,
-          missing: 0,
-          worked_hours: 0,
-          ot_hours: 0,
-          late_minutes: 0,
-        };
-      if (r.workedMinutes > 0) entry.present += 1;
-      if (r.lateMinutes > 0) entry.late += 1;
-      if (r.isAbsent) entry.absent += 1;
-      if (r.status === 'LEAVE') entry.leave += 1;
-      if (r.status === 'MISSING_DATA') entry.missing += 1;
-      entry.worked_hours += r.workedMinutes / 60;
-      entry.ot_hours += r.otMinutes / 60;
-      entry.late_minutes += r.lateMinutes;
-      byEmployee.set(key, entry);
-    }
-
-    const rows = [...byEmployee.values()].map((e) => ({
-      ...e,
-      worked_hours: e.worked_hours.toFixed(2),
-      ot_hours: e.ot_hours.toFixed(2),
-    }));
-
+  if (variant === 'summary') {
     return {
-      title: 'สรุปการลงเวลาทำงาน',
+      kind: 'attendance',
+      title: 'รายงานการลงเวลาแบบละเอียด',
       columns: [
+        { key: 'work_date', header: 'วันที่', width: 14, format: 'date' },
         { key: 'employee_code', header: 'รหัสพนักงาน', width: 14 },
         { key: 'employee_name', header: 'ชื่อ-นามสกุล', width: 26 },
         { key: 'department', header: 'แผนก', width: 18 },
-        { key: 'present', header: 'มาทำงาน', width: 12, numeric: true },
-        { key: 'late', header: 'มาสาย', width: 10, numeric: true },
-        { key: 'absent', header: 'ขาดงาน', width: 10, numeric: true },
-        { key: 'leave', header: 'ลา', width: 10, numeric: true },
-        { key: 'missing', header: 'ข้อมูลไม่ครบ', width: 14, numeric: true },
+        { key: 'check_in', header: 'เวลาเข้า', width: 12 },
+        { key: 'check_out', header: 'เวลาออก', width: 12 },
         { key: 'worked_hours', header: 'ชั่วโมงทำงาน', width: 14, numeric: true },
-        { key: 'ot_hours', header: 'ชั่วโมง OT', width: 12, numeric: true },
-        { key: 'late_minutes', header: 'นาทีที่สาย', width: 12, numeric: true },
+        { key: 'late_minutes', header: 'นาทีมาสาย', width: 12, numeric: true },
+        { key: 'status', header: 'สถานะ', width: 16 },
+        { key: 'daily_pay', header: 'ได้เงินวันนี้', width: 16, numeric: true, format: 'currency' },
+        { key: 'daily_pay_status', header: 'สถานะค่าจ้างรายวัน', width: 18 },
       ],
-      rows,
+      rows: records.map((record) => {
+        const pay = dailyPay.get(record.id);
+        return {
+          work_date: dayjs.utc(record.workDate).format('YYYY-MM-DD'),
+          employee_code: record.employeeCode,
+          employee_name: `${record.employee.firstName} ${record.employee.lastName}`,
+          department: record.employee.department?.name ?? '-',
+          check_in: record.checkIn ? dayjs.utc(record.checkIn).format('HH:mm') : '-',
+          check_out: record.checkOut ? dayjs.utc(record.checkOut).format('HH:mm') : '-',
+          worked_hours: (record.workedMinutes / 60).toFixed(2),
+          late_minutes: record.lateMinutes,
+          status: record.status,
+          daily_pay: pay?.status === 'CALCULATED' ? pay.net : '',
+          daily_pay_status: pay?.status ?? 'NOT_APPLICABLE',
+        };
+      }),
       meta: {
         from: params.from ? dayjs.utc(params.from).format('YYYY-MM-DD') : '-',
         to: params.to ? dayjs.utc(params.to).format('YYYY-MM-DD') : '-',
@@ -249,6 +372,8 @@ async function attendanceReport(
     ot_hours: (r.otMinutes / 60).toFixed(2),
     late_minutes: r.lateMinutes,
     status: r.status,
+    worked_hours: (r.workedMinutes / 60).toFixed(2),
+    daily_pay: dailyPay.get(r.id)?.status === 'CALCULATED' ? dailyPay.get(r.id)!.net : '',
   }));
 
   return {
@@ -263,6 +388,8 @@ async function attendanceReport(
       { key: 'ot_hours', header: 'ชั่วโมง OT', width: 12, numeric: true },
       { key: 'late_minutes', header: 'นาทีที่สาย', width: 12, numeric: true },
       { key: 'status', header: 'สถานะ', width: 14 },
+      { key: 'worked_hours', header: 'ชั่วโมงทำงาน', width: 14, numeric: true },
+      { key: 'daily_pay', header: 'ได้เงินวันนี้', width: 16, numeric: true, format: 'currency' },
     ],
     rows,
     meta: {
@@ -397,7 +524,9 @@ export function toCsv(report: ReportData): string {
 export async function toExcel(report: ReportData): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   workbook.created = new Date();
-  const sheet = workbook.addWorksheet(report.title.slice(0, 30) || 'Report');
+  const sheet = workbook.addWorksheet(
+    report.kind === 'detailed-payroll' ? 'สรุปเงินเดือน' : report.title.slice(0, 30) || 'Report'
+  );
 
   sheet.mergeCells(1, 1, 1, report.columns.length);
   const titleCell = sheet.getCell(1, 1);
@@ -421,6 +550,8 @@ export async function toExcel(report: ReportData): Promise<Buffer> {
     sheet.getColumn(i + 1).width = col.width ?? 16;
   });
   headerRow.commit();
+  sheet.views = [{ state: 'frozen', ySplit: 4 }];
+  sheet.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4, column: report.columns.length } };
 
   report.rows.forEach((row, r) => {
     const excelRow = sheet.getRow(5 + r);
@@ -429,7 +560,7 @@ export async function toExcel(report: ReportData): Promise<Buffer> {
       const cell = excelRow.getCell(c + 1);
       if (col.numeric && raw !== undefined && raw !== '' && !Number.isNaN(Number(raw))) {
         cell.value = Number(raw);
-        cell.numFmt = '#,##0.00';
+        cell.numFmt = col.format === 'currency' ? '#,##0.00' : '#,##0.00';
       } else {
         cell.value = raw ?? '';
       }
@@ -453,6 +584,96 @@ export async function toExcel(report: ReportData): Promise<Buffer> {
     totalRow.commit();
   }
 
+  if (report.kind === 'detailed-payroll') {
+    const rows = report.rows as DetailedPayrollReportRow[];
+    const byDepartment = new Map<
+      string,
+      { employees: number; gross: Prisma.Decimal; deductions: Prisma.Decimal; net: Prisma.Decimal; worked: Prisma.Decimal }
+    >();
+    for (const row of rows) {
+      const entry = byDepartment.get(row.department) ?? {
+        employees: 0,
+        gross: dec(0),
+        deductions: dec(0),
+        net: dec(0),
+        worked: dec(0),
+      };
+      entry.employees += 1;
+      entry.worked = entry.worked.plus(row.worked_hours);
+      if (row._pay_configured === 1) {
+        entry.gross = entry.gross.plus(row.gross_income);
+        entry.deductions = entry.deductions.plus(row.total_deduction);
+        entry.net = entry.net.plus(row.net_salary);
+      }
+      byDepartment.set(row.department, entry);
+    }
+
+    const departmentSheet = workbook.addWorksheet('สรุปแผนก', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    departmentSheet.columns = [
+      { header: 'แผนก', key: 'department', width: 24 },
+      { header: 'จำนวนพนักงาน', key: 'employees', width: 16 },
+      { header: 'รายได้รวม', key: 'gross', width: 18 },
+      { header: 'รายการหักรวม', key: 'deductions', width: 18 },
+      { header: 'เงินสุทธิ', key: 'net', width: 18 },
+      { header: 'ชั่วโมงทำงาน', key: 'worked', width: 16 },
+    ];
+    for (const [department, value] of byDepartment) {
+      departmentSheet.addRow({
+        department,
+        employees: value.employees,
+        gross: Number(value.gross.toFixed(2)),
+        deductions: Number(value.deductions.toFixed(2)),
+        net: Number(value.net.toFixed(2)),
+        worked: Number(value.worked.toFixed(2)),
+      });
+    }
+    styleSimpleSheet(departmentSheet, 6, [3, 4, 5, 6]);
+
+    const attendanceSheet = workbook.addWorksheet('สรุปการลงเวลา', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    });
+    attendanceSheet.columns = [
+      { header: 'รหัสพนักงาน', key: 'employee_code', width: 14 },
+      { header: 'ชื่อ-นามสกุล', key: 'employee_name', width: 26 },
+      { header: 'วันที่มาทำงาน', key: 'present_days', width: 16 },
+      { header: 'ชั่วโมงทำงาน', key: 'worked_hours', width: 16 },
+      { header: 'จำนวนครั้งมาสาย', key: 'late_count', width: 17 },
+      { header: 'นาทีมาสาย', key: 'late_minutes', width: 14 },
+      { header: 'วันลา', key: 'leave_days', width: 12 },
+      { header: 'วันขาด', key: 'absent_days', width: 12 },
+      { header: 'ข้อมูลเวลาไม่ครบ', key: 'missing', width: 18 },
+    ];
+    rows.forEach((row) => attendanceSheet.addRow({
+      employee_code: row.employee_code,
+      employee_name: row.employee_name,
+      present_days: row.present_days,
+      worked_hours: Number(row.worked_hours),
+      late_count: row.late_count,
+      late_minutes: row.late_minutes,
+      leave_days: Number(row.leave_days),
+      absent_days: row.absent_days,
+      missing: row.calculation_status === 'ATTENDANCE_INCOMPLETE' ? 'ต้องตรวจสอบ' : '-',
+    }));
+    styleSimpleSheet(attendanceSheet, 9, [3, 4, 5, 6, 7, 8]);
+  }
+
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
+}
+
+function styleSimpleSheet(
+  sheet: ExcelJS.Worksheet,
+  columnCount: number,
+  numericColumns: number[]
+): void {
+  const header = sheet.getRow(1);
+  header.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+  for (const column of numericColumns) sheet.getColumn(column).numFmt = '#,##0.00';
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columnCount } };
 }

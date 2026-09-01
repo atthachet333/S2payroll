@@ -22,7 +22,139 @@ export type PayrollPeriodStatus =
   | 'PAID'
   | 'LOCKED';
 
-export type PayrollEmployeeStatus = 'READY' | 'NEEDS_REVIEW' | 'MISSING_DATA' | 'EXCLUDED';
+/**
+ * Per-employee payroll readiness. NEEDS_REVIEW and MISSING_DATA are legacy
+ * values still carried by rows calculated before readiness became per-employee;
+ * new calculations produce PARTIAL and ATTENDANCE_INCOMPLETE instead.
+ */
+export type PayrollEmployeeStatus =
+  | 'READY'
+  | 'PARTIAL'
+  | 'UNCONFIGURED'
+  | 'ATTENDANCE_INCOMPLETE'
+  | 'NEEDS_REVIEW'
+  | 'MISSING_DATA'
+  | 'EXCLUDED';
+
+export type LateDeductionType = 'NONE' | 'PER_HOUR_FROM_BASE' | 'FIXED_AMOUNT';
+export type LeaveDeductionType = 'NONE' | 'PER_DAY_FROM_BASE' | 'FIXED_AMOUNT';
+export type AbsenceDeductionType = 'NONE' | 'PER_DAY_FROM_BASE' | 'FIXED_AMOUNT';
+
+/**
+ * Per-employee payroll policy. A null field means "not configured for this
+ * employee" and the company default applies; a 0 amount is a real decision to
+ * deduct nothing.
+ */
+export interface EmployeePayrollPolicy {
+  id: string;
+  employeeId: string;
+  lateDeductionType: LateDeductionType | null;
+  lateDeductionAmount: string | null;
+  leaveDeductionType: LeaveDeductionType | null;
+  leaveDeductionAmount: string | null;
+  absenceDeductionType: AbsenceDeductionType | null;
+  absenceDeductionAmount: string | null;
+  socialSecurityAmount: string | null;
+  taxAmount: string | null;
+  note: string | null;
+  updatedAt: string;
+}
+
+export interface EmployeePayrollPolicyInput {
+  lateDeductionType?: LateDeductionType | null;
+  lateDeductionAmount?: string | null;
+  leaveDeductionType?: LeaveDeductionType | null;
+  leaveDeductionAmount?: string | null;
+  absenceDeductionType?: AbsenceDeductionType | null;
+  absenceDeductionAmount?: string | null;
+  socialSecurityAmount?: string | null;
+  taxAmount?: string | null;
+  note?: string | null;
+}
+
+export interface EmployeePayrollPolicyRow {
+  id: string;
+  employeeCode: string;
+  firstName: string;
+  lastName: string;
+  employmentType: EmploymentType;
+  exempt: boolean;
+  policy: EmployeePayrollPolicy | null;
+}
+
+/** One day of an hourly employee's month, priced at that day's rate. */
+export interface DailyEarningRow {
+  workDate: string;
+  checkIn: string | null;
+  checkOut: string | null;
+  /** The true observed duration. Never replaced by the payable figure. */
+  workedMinutes: number;
+  /** Unpaid break removed because the day ran past eight hours. */
+  breakDeductionMinutes: number;
+  minutesBeforeRounding: number;
+  /** What the company floor discarded. */
+  roundedAwayMinutes: number;
+  /** The minutes actually paid for, after the floor. */
+  payableMinutes: number;
+  hourlyRate: string | null;
+  amount: string;
+  rateConfigured: boolean;
+  status: AttendanceStatus;
+}
+
+/**
+ * What one attendance day was worth, valued by the backend.
+ *
+ * DAILY staff: real money for that day. MONTHLY staff: the informational value
+ * of the date. Monthly payroll-level amounts (social security, tax) are never
+ * spread across days, so this is an attendance figure, not a slice of a payslip.
+ */
+export interface DailyPay {
+  gross: string;
+  attendanceDeduction: string;
+  net: string;
+  status: 'CALCULATED' | 'UNCONFIGURED' | 'NOT_APPLICABLE';
+  basis: string | null;
+  basisKind: 'HOURLY_RATE' | 'DAILY_BASE' | null;
+  lateDeduction: string;
+  leaveDeduction: string;
+  absenceDeduction: string;
+  lateChargedHours: number;
+  /**
+   * DAILY only. The unpaid break removed for a day past eight hours, and the
+   * minutes actually paid for after the 15-minute floor. The attendance row
+   * keeps showing the true observed duration alongside these.
+   */
+  breakDeductionMinutes: number;
+  minutesBeforeRounding: number;
+  roundedAwayMinutes: number;
+  payableMinutes: number;
+  /** MONTHLY: lateness observed and after the company floor. */
+  lateMinutesActual: number;
+  lateMinutesRounded: number;
+  note: string | null;
+}
+
+export interface DailyEarnings {
+  employeeId: string;
+  employmentType: EmploymentType;
+  /** False for monthly staff, whose pay does not come from a day count. */
+  applicable: boolean;
+  year: number;
+  month: number;
+  rows: DailyEarningRow[];
+  summary: {
+    workedDays: number;
+    totalWorkedMinutes: number;
+    totalBreakDeductionMinutes: number;
+    totalPayableMinutes: number;
+    totalRoundedAwayMinutes: number;
+    ratedMinutes: number;
+    unratedMinutes: number;
+    unratedDays: number;
+    totalAmount: string;
+  } | null;
+}
 
 export interface SessionUser {
   id: string;
@@ -112,6 +244,8 @@ export interface Employee {
   department?: Department | null;
   position?: Position | null;
   salaryHistory?: SalaryHistory[];
+  /** Read-only context on payroll detail; period adjustments never write it. */
+  payrollPolicy?: EmployeePayrollPolicy | null;
   /** Master-data completeness, decided by the backend - never recomputed here. */
   profileCompleteness?: EmployeeProfileCompleteness;
   lineUserId?: string | null;
@@ -155,6 +289,8 @@ export interface AttendanceRecord {
   statusOverride?: boolean;
   isLocked: boolean;
   note: string | null;
+  /** Server-valued day earning. Absent on endpoints that do not value rows. */
+  dailyPay?: DailyPay | null;
   employee?: {
     id: string;
     employeeCode: string;
@@ -225,6 +361,11 @@ export interface PeriodSummary {
   workingHours: string;
   otHours: string;
   ready: number;
+  partial: number;
+  unconfigured: number;
+  attendanceIncomplete: number;
+  excluded: number;
+  /** Legacy aliases, folded so older rows still count somewhere. */
   needsReview: number;
   missingData: number;
   statusCounts: Record<string, number>;
@@ -261,7 +402,21 @@ export interface PayrollEmployee {
   commissionAmount: string;
   otherIncome: string;
   grossIncome: string;
+  unpaidLeaveDays: string;
+  dailyBase: string;
+  hourlyBase: string;
+  /** DAILY only: unpaid break removed, and minutes actually paid for. */
+  breakDeductionMinutes: number;
+  payableMinutes: number;
+  roundedAwayMinutes: number;
+  /** MONTHLY: lateness observed and after the company floor. */
+  roundedLateMinutes: number;
+  earlyLeaveMinutes: number;
+  roundedEarlyLeaveMinutes: number;
+  actualOtMinutes: number;
   lateDeduction: string;
+  lateDeductionHours: number;
+  leaveDeduction: string;
   absenceDeduction: string;
   socialSecurity: string;
   tax: string;
@@ -270,6 +425,10 @@ export interface PayrollEmployee {
   totalDeduction: string;
   netSalary: string;
   status: PayrollEmployeeStatus;
+  /** False when no wage rate was known - the amounts are not a final salary. */
+  payConfigured: boolean;
+  /** True when the figures are a preview rather than a settled amount. */
+  isEstimate: boolean;
   reviewNotes: string[] | null;
   hasAdjustment: boolean;
 }
@@ -311,6 +470,24 @@ export interface PayslipLine {
   amount: string;
 }
 
+/** How an employee's pay was arrived at, as printed on the payslip. */
+export interface PayslipPayBasis {
+  kind: 'HOURLY' | 'MONTHLY';
+  hourlyRate: string | null;
+  monthlySalary: string | null;
+  dailyBase: string;
+  hourlyBase: string;
+  /** The true observed duration across the period. */
+  workedMinutes: number;
+  /**
+   * DAILY only, and optional because snapshots frozen before these existed
+   * will never carry them. Break removed, and minutes actually paid for.
+   */
+  breakDeductionMinutes?: number;
+  payableMinutes?: number;
+  payConfigured: boolean;
+}
+
 export interface PayslipSnapshot {
   company: {
     name: string;
@@ -325,12 +502,32 @@ export interface PayslipSnapshot {
     nickname: string | null;
     department: string | null;
     position: string | null;
+    employmentType: EmploymentType;
     bankName: string | null;
     bankAccount: string | null;
     taxId: string | null;
     socialSecurity: string | null;
   };
-  period: { code: string; name: string; startDate: string; endDate: string };
+  /**
+   * How this employee is paid, so the document can be honest about it: hourly
+   * staff have a rate and worked minutes and no monthly salary; salaried staff
+   * have a salary whose per-day and per-hour figures are derived, not a second
+   * kind of wage.
+   */
+  /**
+   * Optional on purpose. A snapshot is frozen when the payslip is issued, so a
+   * document issued before this field existed will never have it, and the
+   * viewer has to cope rather than crash.
+   */
+  pay?: PayslipPayBasis;
+  period: {
+    code: string;
+    name: string;
+    startDate: string;
+    endDate: string;
+    /** Absent on snapshots issued before the status was captured. */
+    status?: PayrollPeriodStatus;
+  };
   paymentDate: string | null;
   attendance: {
     workingDays: number;
@@ -386,11 +583,29 @@ export interface PrePayrollReport {
   readiness: {
     employees: number;
     ready: number;
-    missingPay: number;
+    partial: number;
+    unconfigured: number;
     incompleteAttendance: number;
+    excluded: number;
     inProgressToday: number;
+    /** Retained alias for `unconfigured`. */
+    missingPay: number;
   };
+  employees: EmployeeReadiness[];
   findings: CheckFinding[];
+}
+
+/** One employee's readiness, resolved before any money is computed. */
+export interface EmployeeReadiness {
+  employeeId: string;
+  employeeCode: string;
+  employeeName: string;
+  employmentType: EmploymentType;
+  status: PayrollEmployeeStatus;
+  payConfigured: boolean;
+  reasons: string[];
+  action: 'SET_PAY' | 'FIX_ATTENDANCE' | 'RECORD_ATTENDANCE' | null;
+  inProgressToday: boolean;
 }
 
 export interface PeriodSuggestion {
@@ -431,16 +646,27 @@ export interface Overview {
     missingData: number;
   };
   payrollStatus: { ready: number; needsReview: number; missingData: number };
-  trend: {
-    code: string;
-    name: string;
-    label: string;
-    gross: number;
-    net: number;
-    ot: number;
-    deduction: number;
-    status: PayrollPeriodStatus;
-  }[];
+  trend: OverviewTrendPoint[];
+}
+
+/**
+ * One month of the payroll trend. A month with no calculated payroll carries
+ * nulls, never zeros - zero would assert that payroll ran and paid nobody.
+ */
+export interface OverviewTrendPoint {
+  code: string;
+  /** Full Thai month, e.g. "สิงหาคม 2026". Used for tooltips. */
+  name: string;
+  /** Numeric MM/YYYY, kept for compatibility. */
+  label: string;
+  /** Abbreviated Thai month, e.g. "ส.ค. 2026". Used for axis ticks. */
+  shortLabel?: string;
+  gross: number | null;
+  net: number | null;
+  ot: number | null;
+  deduction: number | null;
+  status: PayrollPeriodStatus | null;
+  isEstimate: boolean;
 }
 
 export type SyncRowAction =
@@ -566,14 +792,26 @@ export interface ReportColumn {
   header: string;
   width?: number;
   numeric?: boolean;
+  format?: 'currency' | 'number' | 'date';
 }
 
 export interface ReportData {
+  kind?: 'detailed-payroll' | 'attendance' | 'generic';
   title: string;
   columns: ReportColumn[];
   rows: Record<string, string | number>[];
   totals?: Record<string, string | number>;
   meta: Record<string, string>;
+  summary?: {
+    employeeCount: number;
+    monetaryEmployeeCount: number;
+    unconfiguredCount: number;
+    grossTotal: string;
+    deductionTotal: string;
+    netTotal: string;
+    workedHoursTotal: string;
+    otHoursTotal: string;
+  };
 }
 
 export interface Holiday {

@@ -18,7 +18,18 @@ import {
   TabsTrigger,
   Textarea,
 } from '@/components/ui';
-import { formatIsoDate } from '@/utils/format';
+import { formatIsoDate, formatMoney } from '@/utils/format';
+import {
+  DailyRateSelector,
+  PayrollPolicyFields,
+  derivedBases,
+  emptyPolicyForm,
+  policyFormFrom,
+  policyFormToInput,
+  policyFormsEqual,
+  validateHourlyRate,
+  type PolicyFormState,
+} from './PayrollSettingsFields';
 import type { Employee } from '@/types';
 
 interface FormState {
@@ -49,6 +60,7 @@ interface FormState {
   salaryChangeReason: string;
   payProfileAmount: string;
   payEffectiveFrom: string;
+  policy: PolicyFormState;
 }
 
 const emptyForm = (): FormState => ({
@@ -79,6 +91,7 @@ const emptyForm = (): FormState => ({
   salaryChangeReason: '',
   payProfileAmount: '',
   payEffectiveFrom: '',
+  policy: emptyPolicyForm(),
 });
 
 const fromEmployee = (e: Employee): FormState => ({
@@ -109,6 +122,7 @@ const fromEmployee = (e: Employee): FormState => ({
   salaryChangeReason: '',
   payProfileAmount: '',
   payEffectiveFrom: formatIsoDate(new Date()),
+  policy: emptyPolicyForm(),
 });
 
 export default function EmployeeFormDialog({
@@ -148,6 +162,29 @@ export default function EmployeeFormDialog({
     queryFn: () => employeeApi.payProfiles(employee!.id),
     enabled: open && Boolean(employee?.id),
   });
+  // Presets come from settings so the quick picks can change without a deploy.
+  const presetsQuery = useQuery({
+    queryKey: ['daily-rate-presets'],
+    queryFn: settingsApi.dailyRatePresets,
+    enabled: open,
+    staleTime: 5 * 60_000,
+  });
+  const policyQuery = useQuery({
+    queryKey: ['employee-payroll-policy', employee?.id],
+    queryFn: () => employeeApi.payrollPolicy(employee!.id),
+    enabled: open && Boolean(employee?.id),
+  });
+
+  // The saved policy is kept so the submit path can tell an actual edit from an
+  // untouched form and skip the write entirely when nothing changed.
+  const savedPolicy = React.useMemo(
+    () => policyFormFrom(policyQuery.data ?? null),
+    [policyQuery.data]
+  );
+  React.useEffect(() => {
+    if (!open || !employee) return;
+    setForm((current) => ({ ...current, policy: savedPolicy }));
+  }, [open, employee, savedPolicy]);
 
   React.useEffect(() => {
     if (!open || !employee || !payProfilesQuery.data) return;
@@ -167,6 +204,10 @@ export default function EmployeeFormDialog({
     setForm((prev) => ({ ...prev, [key]: value }));
 
   const salaryChanged = isEdit && employee ? form.baseSalary !== employee.baseSalary : false;
+
+  const monthlyBases = ['MONTHLY', 'CONTRACT'].includes(form.employmentType)
+    ? derivedBases(form.payProfileAmount)
+    : null;
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -215,9 +256,15 @@ export default function EmployeeFormDialog({
             isActive: true,
           });
         }
+        if (!policyFormsEqual(form.policy, savedPolicy)) {
+          await employeeApi.savePayrollPolicy(saved.id, policyFormToInput(form.policy));
+        }
         return saved;
       }
       const saved = await employeeApi.create({ ...payload, employeeCode: form.employeeCode });
+      if (!policyFormsEqual(form.policy, emptyPolicyForm())) {
+        await employeeApi.savePayrollPolicy(saved.id, policyFormToInput(form.policy));
+      }
       if (form.payProfileAmount) {
         const monthly = ['MONTHLY', 'CONTRACT'].includes(form.employmentType);
         await employeeApi.createPayProfile(saved.id, {
@@ -235,14 +282,24 @@ export default function EmployeeFormDialog({
       void queryClient.invalidateQueries({ queryKey: ['employees'] });
       void queryClient.invalidateQueries({ queryKey: ['employee'] });
       void queryClient.invalidateQueries({ queryKey: ['employee-pay-profiles'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-payroll-policy'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-payroll-policies'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-daily-earnings'] });
       void queryClient.invalidateQueries({ queryKey: ['pay-configurations'] });
       onOpenChange(false);
     },
     onError: (err) => setError(apiErrorMessage(err)),
   });
 
+  const rateError =
+    form.employmentType === 'DAILY' ? validateHourlyRate(form.payProfileAmount) : null;
+
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
+    if (rateError) {
+      setError(rateError);
+      return;
+    }
     setError(null);
     mutation.mutate();
   };
@@ -378,25 +435,70 @@ export default function EmployeeFormDialog({
                 <p className="text-sm font-medium">การตั้งค่าการจ่ายเงินแบบมีวันที่เริ่มใช้</p>
                 <p className="mt-1 text-xs text-muted-foreground">กรอกเฉพาะเมื่อต้องการเพิ่มอัตราใหม่ ประวัติเดิมจะไม่ถูกเขียนทับ</p>
               </div>
-              <Field
-                label={
-                  ['DAILY', 'HOURLY'].includes(form.employmentType)
-                    ? 'อัตราค่าจ้าง (บาท/ชั่วโมง)'
-                    : 'เงินเดือน (บาท/เดือน)'
-                }
-              >
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="0"
+              {/* Daily staff choose from the company's agreed rates. Every other
+                  employment type keeps a free amount, because those rates are
+                  individually negotiated. */}
+              {form.employmentType === 'DAILY' ? (
+                <DailyRateSelector
                   value={form.payProfileAmount}
-                  onChange={(e) => set('payProfileAmount', e.target.value)}
-                  placeholder="เว้นว่างหากยังไม่กำหนดอัตราจริง"
+                  onChange={(value) => set('payProfileAmount', value)}
+                  presets={presetsQuery.data?.presets}
                 />
-              </Field>
-              <Field label="วันที่เริ่มใช้">
+              ) : (
+                <Field
+                  label={
+                    form.employmentType === 'HOURLY'
+                      ? 'อัตราค่าจ้าง (บาท/ชั่วโมง)'
+                      : 'เงินเดือน (บาท/เดือน)'
+                  }
+                >
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={form.payProfileAmount}
+                    onChange={(e) => set('payProfileAmount', e.target.value)}
+                    placeholder="เว้นว่างหากยังไม่กำหนดอัตราจริง"
+                  />
+                </Field>
+              )}
+              <Field label="วันที่เริ่มใช้" className={form.employmentType === 'DAILY' ? 'sm:col-span-2' : undefined}>
                 <Input type="date" value={form.payEffectiveFrom} onChange={(e) => set('payEffectiveFrom', e.target.value)} required={Boolean(form.payProfileAmount)} />
               </Field>
+
+              {/* What a monthly salary implies per day and per hour. Shown here
+                  because those are the numbers the deduction rules below price
+                  against - the employee is still paid monthly. */}
+              {monthlyBases && (
+                <div className="rounded-lg border border-border bg-secondary/40 px-3.5 py-3 text-sm sm:col-span-2">
+                  <p className="font-medium">ฐานค่าจ้างที่ได้จากเงินเดือนนี้</p>
+                  <div className="mt-1.5 flex flex-wrap gap-x-6 gap-y-1 text-muted-foreground">
+                    <span>
+                      ฐานต่อวัน{' '}
+                      <span className="font-semibold tabular-nums text-foreground">
+                        {formatMoney(monthlyBases.daily)}
+                      </span>{' '}
+                      บาท
+                    </span>
+                    <span>
+                      ฐานต่อชั่วโมง{' '}
+                      <span className="font-semibold tabular-nums text-foreground">
+                        {formatMoney(monthlyBases.hourly)}
+                      </span>{' '}
+                      บาท
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-xs">
+                    เงินเดือน ÷ 30 = ฐานต่อวัน · ฐานต่อวัน ÷ 8 = ฐานต่อชั่วโมง
+                    ใช้สำหรับการหักเงินและการแสดงผลเท่านั้น
+                  </p>
+                </div>
+              )}
+
+              <PayrollPolicyFields
+                form={form.policy}
+                onChange={(policy) => set('policy', policy)}
+              />
 
               <Field label="ธนาคาร">
                 <Input value={form.bankName} onChange={(e) => set('bankName', e.target.value)} />

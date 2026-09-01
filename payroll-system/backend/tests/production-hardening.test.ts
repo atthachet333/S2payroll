@@ -235,13 +235,14 @@ describe('production configuration validation', () => {
 
 describe('payslip PDF filenames', () => {
   it('builds the documented filename shape', () => {
-    expect(payslipFilename('EMP001', '2026-07')).toBe('payslip-EMP001-2026-07.pdf');
+    // Brand-prefixed so a downloaded file is identifiable outside the app.
+    expect(payslipFilename('EMP001', '2026-07')).toBe('S2A-PAYROLL_EMP001_2026-07.pdf');
   });
 
   it('strips characters that are unsafe in a filesystem or a ZIP entry', () => {
     expect(payslipFilename('../../etc/passwd', '2026-07')).not.toContain('/');
     expect(payslipFilename('../../etc/passwd', '2026-07')).not.toContain('..');
-    expect(payslipFilename('EMP 001', '2026/07')).toBe('payslip-EMP001-202607.pdf');
+    expect(payslipFilename('EMP 001', '2026/07')).toBe('S2A-PAYROLL_EMP001_202607.pdf');
   });
 
   it('strips Thai and other non-ASCII characters rather than emitting them raw', () => {
@@ -251,7 +252,7 @@ describe('payslip PDF filenames', () => {
   });
 
   it('never produces an empty identifier', () => {
-    expect(payslipFilename('', '')).toBe('payslip-unknown-unknown.pdf');
+    expect(payslipFilename('', '')).toBe('S2A-PAYROLL_unknown_unknown.pdf');
   });
 });
 
@@ -342,7 +343,7 @@ describe('audit coverage', () => {
   const REQUIRED_ACTIONS = [
     'ATTENDANCE_CORRECT',
     'PAYROLL_CALCULATE',
-    'PAYROLL_ADJUST',
+    'PAYROLL_EMPLOYEE_ADJUSTMENT',
     'PAYROLL_APPROVE',
     'PAYROLL_MARK_PAID',
     'PAYROLL_LOCK',

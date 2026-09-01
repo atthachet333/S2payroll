@@ -36,6 +36,10 @@ const attendance = (o: Partial<AttendanceAggregate> = {}): AttendanceAggregate =
   unpaidLeaveDays: 0,
   lateCount: 0,
   lateMinutes: 0,
+  roundedLateMinutes: 0,
+  earlyLeaveMinutes: 0,
+  roundedEarlyLeaveMinutes: 0,
+  actualOtMinutes: 0,
   workedMinutes: 22 * 8 * 60,
   normalMinutes: 22 * 8 * 60,
   otWeekdayMinutes: 0,
@@ -132,7 +136,7 @@ describe('attendance problem flags reach the payroll row', () => {
       },
       settings()
     );
-    expect(result.status).toBe('MISSING_DATA');
+    expect(result.status).toBe('ATTENDANCE_INCOMPLETE');
     const note = result.reviewNotes.join(' ');
     expect(note).toContain('ไม่มีเวลาเข้า 1 วัน');
     expect(note).toContain('ไม่มีเวลาออก 2 วัน');
@@ -163,7 +167,7 @@ describe('attendance problem flags reach the payroll row', () => {
       },
       settings()
     );
-    expect(result.status).toBe('MISSING_DATA');
+    expect(result.status).toBe('ATTENDANCE_INCOMPLETE');
     expect(result.reviewNotes.join(' ')).toContain('ไม่พบข้อมูลการลงเวลา');
   });
 });
@@ -196,6 +200,10 @@ describe('manual adjustment validation', () => {
 
   it('accepts commissionAmount now that commission is adjustable', () => {
     expect(adjustPayrollSchema.safeParse(valid({ field: 'commissionAmount' })).success).toBe(true);
+  });
+
+  it('accepts a this-period leave deduction override', () => {
+    expect(adjustPayrollSchema.safeParse(valid({ field: 'leaveDeduction' })).success).toBe(true);
   });
 
   it('rejects a non-numeric amount', () => {

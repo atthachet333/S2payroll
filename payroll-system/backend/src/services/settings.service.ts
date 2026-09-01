@@ -177,3 +177,22 @@ export async function ensureDefaultSettings(): Promise<number> {
   await prisma.payrollSetting.createMany({ data: missing });
   return missing.length;
 }
+
+/**
+ * Quick-pick hourly rates offered by the daily-rate form.
+ *
+ * Suggestions only. The API validates that a rate is positive money and nothing
+ * more - restricting wages to a fixed list made the system unable to record
+ * genuinely negotiated rates like 62 or 82.50. Renamed in intent rather than in
+ * key, so existing stored settings keep working.
+ *
+ * An empty or malformed setting simply yields no presets; the form still takes
+ * a typed amount.
+ */
+export function dailyHourlyRatePresets(settings: PayrollSettings): number[] {
+  return settings
+    .string('DAILY_HOURLY_RATE_OPTIONS')
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}

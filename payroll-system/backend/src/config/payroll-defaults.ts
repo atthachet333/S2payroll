@@ -83,13 +83,65 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
     description:
       'นโยบายปัจจุบันไม่ผ่อนผัน เข้างานหลังเวลาเริ่มงานแม้ 1 นาทีถือว่าสาย ค่านี้ต้องเป็น 0',
   },
+  // Withdrawn, and deliberately left at false. The daily break is now applied
+  // once, in the payroll layer, by DAILY_BREAK_THRESHOLD_MINUTES /
+  // DAILY_BREAK_DEDUCTION_MINUTES. Attendance keeps the true observed duration
+  // so the record still says what actually happened. Turning this back on would
+  // deduct the break twice - once from the stored time and once again from pay.
   {
     key: 'DAILY_DEDUCT_BREAK',
     value: 'false',
     valueType: SettingValueType.BOOLEAN,
     group: 'ATTENDANCE',
-    label: 'หักเวลาพักจากพนักงานรายวัน',
-    description: 'ปิดไว้เพื่อคิดเวลารายวันตามเวลาเข้า-ออกจริงโดยไม่หักพักอัตโนมัติ',
+    label: 'หักเวลาพักจากเวลาที่บันทึกของพนักงานรายวัน — ยกเลิกแล้ว',
+    description:
+      'ไม่มีผลอีกต่อไป เวลาที่บันทึกของพนักงานรายวันจะเก็บเวลาทำงานจริงเสมอ การหักเวลาพักย้ายไปคิดตอนคำนวณค่าจ้างที่ "เกณฑ์หักเวลาพัก" และ "เวลาพักที่หัก"',
+  },
+
+  // --- Daily payable time ---
+  // Two company rules for DAILY staff, applied in this order at payroll time
+  // and nowhere else: a day longer than the threshold loses an unpaid break,
+  // and what remains is floored to the rounding increment.
+  // The one company-wide rounding interval. Applies to every employment type
+  // and to every duration that reaches money - worked time, lateness, early
+  // leave and approved OT alike. Stored punches are never altered by it.
+  {
+    key: 'TIME_ROUNDING_MINUTES',
+    value: '15',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'ช่วงเวลาที่ใช้ปัดลงในการคำนวณ (นาที)',
+    description:
+      'ระบบจะปัดเวลาลงตามช่วงที่กำหนด เช่น 15 นาที เพื่อให้การคำนวณและตรวจสอบเป็นมาตรฐานเดียวกัน · ใช้กับพนักงานทุกประเภท และเวลาเข้า-ออกจริงจะไม่ถูกแก้ไข · ตัวอย่าง 31–44 นาที ใช้คิด 30 นาที',
+  },
+  // Superseded by TIME_ROUNDING_MINUTES and no longer read. Two settings that
+  // could disagree about the same rule is precisely what the single policy
+  // exists to prevent; the key is retained only so an existing row is explained.
+  {
+    key: 'DAILY_PAY_ROUNDING_MINUTES',
+    value: '15',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'ปัดเวลาคิดค่าจ้างพนักงานรายวัน (นาที) — ยกเลิกแล้ว',
+    description:
+      'ไม่มีผลอีกต่อไป ใช้ "ช่วงเวลาที่ใช้ปัดลงในการคำนวณ" ซึ่งเป็นค่ากลางของทั้งระบบแทน',
+  },
+  {
+    key: 'DAILY_BREAK_THRESHOLD_MINUTES',
+    value: '480',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'เกณฑ์หักเวลาพักพนักงานรายวัน (นาที)',
+    description:
+      'ทำงาน "มากกว่า" ค่านี้จึงหักเวลาพัก ทำงานเท่ากับ 480 นาทีพอดีจะไม่ถูกหัก',
+  },
+  {
+    key: 'DAILY_BREAK_DEDUCTION_MINUTES',
+    value: '60',
+    valueType: SettingValueType.NUMBER,
+    group: 'DEDUCTION',
+    label: 'เวลาพักที่หักของพนักงานรายวัน (นาที)',
+    description: 'หักออกจากเวลาทำงานก่อนปัดเวลา ใช้เฉพาะเมื่อทำงานเกินเกณฑ์ข้างต้น',
   },
   {
     key: 'DAILY_OT_ENABLED',
@@ -372,6 +424,21 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
     group: 'TAX',
     label: 'ขั้นบันไดภาษีเงินได้บุคคลธรรมดา',
     description: 'Progressive brackets. upTo=null marks the final open-ended bracket.',
+  },
+
+  // --- Wage rates ---
+  // Quick-pick values for the daily-rate form. These are suggestions, not a
+  // whitelist: the API accepts any positive money amount, because the company
+  // negotiates rates that are not on this list. The key name is kept for
+  // compatibility with installations that already store it.
+  {
+    key: 'DAILY_HOURLY_RATE_OPTIONS',
+    value: '60,75,93,100',
+    valueType: SettingValueType.STRING,
+    group: 'PAYROLL',
+    label: 'อัตราค่าจ้างต่อชั่วโมงที่ใช้บ่อย (บาท)',
+    description:
+      'ปุ่มลัดในหน้ากำหนดค่าจ้างพนักงานรายวัน คั่นด้วยเครื่องหมายจุลภาค เป็นเพียงตัวเลือกที่ใช้บ่อย ไม่ใช่ข้อจำกัด ผู้ใช้พิมพ์อัตราอื่นได้',
   },
 
   // --- Payroll behaviour ---

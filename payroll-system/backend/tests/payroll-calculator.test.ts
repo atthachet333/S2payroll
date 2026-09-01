@@ -39,6 +39,10 @@ const attendance = (overrides: Partial<AttendanceAggregate> = {}): AttendanceAgg
   unpaidLeaveDays: 0,
   lateCount: 0,
   lateMinutes: 0,
+  roundedLateMinutes: 0,
+  earlyLeaveMinutes: 0,
+  roundedEarlyLeaveMinutes: 0,
+  actualOtMinutes: 0,
   workedMinutes: 22 * 8 * 60,
   normalMinutes: 22 * 8 * 60,
   otWeekdayMinutes: 0,
@@ -98,8 +102,11 @@ describe('rate derivation', () => {
     expect(result.workingHours.toFixed(2)).toBe('5.25');
     expect(result.baseSalary.toFixed(2)).toBe('0.00');
     expect(result.grossIncome.toFixed(2)).toBe('0.00');
-    expect(result.reviewNotes).toContain('ยังไม่ได้กำหนดค่าจ้างพนักงานรายวัน — ยังไม่รวมค่าจ้างในยอดเงิน');
-    expect(result.status).toBe('NEEDS_REVIEW');
+    // No rate, so no money - and the row says so rather than presenting 0 as a
+    // wage that was actually earned.
+    expect(result.payConfigured).toBe(false);
+    expect(result.reviewNotes).toContain('ยังไม่ได้กำหนดอัตราค่าจ้าง — ยอดนี้ยังไม่ใช่ค่าจ้างจริง');
+    expect(result.status).toBe('UNCONFIGURED');
   });
 
   it('does not divide by zero when the salary divisor is misconfigured to 0', () => {
@@ -240,10 +247,13 @@ describe('calculatePayroll', () => {
 
   it('charges lateness in whole-hour blocks at the hourly rate', () => {
     const result = calculatePayroll(
-      { employee: employee(), attendance: attendance({ lateCount: 2, lateMinutes: 60 }) },
+      {
+        employee: employee(),
+        attendance: attendance({ lateCount: 2, lateMinutes: 60, roundedLateMinutes: 60 }),
+      },
       settings()
     );
-    // 60 late minutes = ceil(60/60) = 1 chargeable hour at 125.00
+    // 60 late minutes floor to 60, then ceil to 1 chargeable hour at 125.00
     expect(result.lateDeductionHours).toBe(1);
     expect(result.lateDeduction.toFixed(2)).toBe('125.00');
   });
@@ -263,15 +273,19 @@ describe('calculatePayroll', () => {
     );
     // 2 days at the fixed 30-day rate: 30000/30 * 2 = 2000.00
     expect(result.absenceDeduction.toFixed(2)).toBe('2000.00');
-    expect(result.status).toBe('NEEDS_REVIEW');
+    expect(result.status).toBe('PARTIAL');
   });
 
-  it('treats unpaid leave the same as an absence for deduction purposes', () => {
+  it('charges unpaid leave on the same basis as an absence, on its own line', () => {
     const result = calculatePayroll(
       { employee: employee(), attendance: attendance({ unpaidLeaveDays: 1 }) },
       settings()
     );
-    expect(result.absenceDeduction.toFixed(2)).toBe('1000.00');
+    // Leave and absence are separate facts and are now reported separately, but
+    // with no employee policy set the company rule still prices unpaid leave at
+    // the daily rate - the money is unchanged, only the line it appears on.
+    expect(result.leaveDeduction.toFixed(2)).toBe('1000.00');
+    expect(result.absenceDeduction.toFixed(2)).toBe('0.00');
   });
 
   it('does not deduct anything for paid leave', () => {
@@ -280,6 +294,7 @@ describe('calculatePayroll', () => {
       settings()
     );
     expect(result.absenceDeduction.toFixed(2)).toBe('0.00');
+    expect(result.leaveDeduction.toFixed(2)).toBe('0.00');
   });
 
   it('adds manual allowance, bonus and other income into gross', () => {
@@ -358,7 +373,7 @@ describe('calculatePayroll', () => {
       { employee: employee(), attendance: attendance({ missingDataDays: 3 }) },
       settings()
     );
-    expect(result.status).toBe('MISSING_DATA');
+    expect(result.status).toBe('ATTENDANCE_INCOMPLETE');
     expect(result.reviewNotes.join(' ')).toContain('3');
   });
 
@@ -367,7 +382,7 @@ describe('calculatePayroll', () => {
       { employee: employee(), attendance: attendance({ presentDays: 0, workedMinutes: 0 }) },
       settings()
     );
-    expect(result.status).toBe('MISSING_DATA');
+    expect(result.status).toBe('ATTENDANCE_INCOMPLETE');
   });
 
   it('allows an attendance-exempt monthly executive without attendance', () => {
@@ -398,7 +413,7 @@ describe('calculatePayroll', () => {
       settings()
     );
     expect(result.netSalary.isNegative()).toBe(true);
-    expect(result.status).toBe('NEEDS_REVIEW');
+    expect(result.status).toBe('PARTIAL');
   });
 
   it('emits line items that sum exactly to the header totals', () => {

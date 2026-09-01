@@ -170,7 +170,8 @@ export async function previewEmployeeSync(tab = EMPLOYEE_SHEET_TAB): Promise<Emp
     diff('department', current.department?.name ?? null, row.department);
     diff('position', current.position?.name ?? null, row.position);
     diff('employmentType', current.employmentType, row.employmentType);
-    diff('status', current.status, row.status);
+    // status is intentionally absent: the sync no longer writes it for an
+    // existing employee, so reporting it as a pending change would be a lie.
 
     const action: EmployeeSyncAction = changes.length ? 'UPDATE' : 'UNCHANGED';
     return { ...base, changes, action };
@@ -343,9 +344,15 @@ export async function importEmployees(options: EmployeeSyncOptions): Promise<Emp
       if (sheetOwned.employmentType && sheetOwned.employmentType !== current.employmentType) {
         data.employmentType = sheetOwned.employmentType;
       }
-      if (sheetOwned.status && sheetOwned.status !== current.status) {
-        data.status = sheetOwned.status;
-      }
+      // Employment status is deliberately NOT written back from the sheet.
+      //
+      // The sheet owns who a person is; the app owns whether they are still on
+      // the payroll. Letting the sheet own status meant an admin deactivating
+      // somebody in the UI had them flipped back to ACTIVE by the next
+      // auto-sync a minute later, so the person kept reappearing in payroll
+      // readiness and attendance expectations. The sheet still supplies the
+      // initial status when a brand-new employee is created above; from then on
+      // only a deliberate action in the app can change it.
 
       if (Object.keys(data).length === 0) {
         result.unchanged += 1;
