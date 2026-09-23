@@ -259,6 +259,7 @@ export interface WorkCalendar {
 // --- google sheets -----------------------------------------------------------
 
 export interface AutoSyncSourceStatus {
+  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED';
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
   lastSuccessfulAt: string | null;
@@ -268,6 +269,7 @@ export interface AutoSyncSourceStatus {
 }
 
 export interface AutoSyncStatus {
+  overall: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED';
   enabled: boolean;
   running: boolean;
   intervalSeconds: number;

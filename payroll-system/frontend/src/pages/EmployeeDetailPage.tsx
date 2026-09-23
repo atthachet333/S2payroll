@@ -13,6 +13,7 @@ import MonthSelector, {
   type MonthValue,
 } from '@/features/employees/MonthSelector';
 import { DailyPayCell } from '@/features/attendance/DailyPayCell';
+import AttendanceSessions from '@/features/attendance/AttendanceSessions';
 import { monthRange } from '@/utils/bangkok';
 import PayslipHistory from '@/features/payslips/PayslipHistory';
 import {
@@ -424,9 +425,12 @@ export default function EmployeeDetailPage() {
                         {attendanceQuery.data.items.map((row) => (
                           <tr key={row.id}>
                             <td className="whitespace-nowrap">{formatDateWithWeekday(row.workDate)}</td>
-                            <td>{formatTime(row.checkIn)}</td>
+                            <td><div className="flex items-center gap-1">{formatTime(row.checkIn)}<AttendanceSessions record={row} /></div></td>
                             <td>{formatTime(row.checkOut)}</td>
-                            <td className="num">{formatMinutes(row.workedMinutes)}</td>
+                            <td className="num">
+                              {formatMinutes(row.completedWorkedMinutes ?? row.workedMinutes)}
+                              {row.hasOpenSession && <span className="ml-1 text-info">+ กำลังทำงาน</span>}
+                            </td>
                             <td className="num text-muted-foreground">
                               {row.dailyPay && row.dailyPay.breakDeductionMinutes > 0
                                 ? formatMinutes(row.dailyPay.breakDeductionMinutes)

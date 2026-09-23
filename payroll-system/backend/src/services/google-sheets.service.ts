@@ -46,6 +46,9 @@ export interface SheetRow {
   workHoursWarning?: string | null;
   checkInEvents?: string[];
   checkOutEvents?: string[];
+  completedWorkedMinutes?: number;
+  hasOpenSession?: boolean;
+  malformedSequence?: boolean;
 }
 
 export interface SyncError {
@@ -215,6 +218,9 @@ export async function fetchSheet(
         workHoursWarning: day.workHoursWarning,
         checkInEvents: day.checkInEvents.map((event) => event.time),
         checkOutEvents: day.checkOutEvents.map((event) => event.time),
+        completedWorkedMinutes: day.completedWorkedMinutes,
+        hasOpenSession: day.hasOpenSession,
+        malformedSequence: day.malformedSequence,
       })),
     };
   }
@@ -422,18 +428,52 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
         sourceEvents: row.sourceEvents,
       };
 
-      if (row.eventStatus === 'INVALID' || row.eventStatus === 'MULTIPLE_EVENTS') {
-        const action = row.eventStatus === 'MULTIPLE_EVENTS' ? 'MULTIPLE_EVENTS' : 'INVALID';
-        if (action === 'MULTIPLE_EVENTS') multipleEvents += 1;
-        else invalid += 1;
+      const hash = rowHash(row);
+
+      // Archive source events before deciding whether their sequence is usable.
+      // Malformed punches are evidence to review, not data to discard.
+      if (!options.dryRun) {
+        const rawEvents = row.sourceEvents?.length ? row.sourceEvents : [null];
+        for (const event of rawEvents) {
+          const eventHash = event ? sourceEventHash(event) : hash;
+          const archived = await prisma.attendanceRawData.findFirst({ where: { rowHash: eventHash } });
+          if (!archived) {
+            await prisma.attendanceRawData.create({
+              data: {
+                syncId: sync?.id ?? null,
+                employeeCode: row.employeeCode,
+                rawDate: event?.date ?? row.date,
+                rawCheckIn: event?.type.toLowerCase() === 'checkin' ? event.time : row.checkIn,
+                rawCheckOut: event?.type.toLowerCase() === 'checkout' ? event.time : row.checkOut,
+                rowHash: eventHash,
+                sheetRow: event?.sheetRow ?? row.sheetRow,
+                payload: (event ?? row) as unknown as object,
+              },
+            });
+          }
+        }
+      }
+
+      if (row.eventStatus === 'INVALID') {
+        invalid += 1;
         errors.push({
           row: row.sheetRow,
           employeeCode: row.employeeCode,
           date: row.date,
-          message: row.eventReason ?? action,
+          message: row.eventReason ?? 'INVALID',
         });
-        addPreview({ ...previewBase, action, reason: row.eventReason });
+        addPreview({ ...previewBase, action: 'INVALID', reason: row.eventReason });
         continue;
+      }
+
+      if (row.eventStatus === 'MULTIPLE_EVENTS') {
+        multipleEvents += 1;
+        errors.push({
+          row: row.sheetRow,
+          employeeCode: row.employeeCode,
+          date: row.date,
+          message: row.eventReason ?? 'ลำดับการลงเวลาไม่สมบูรณ์',
+        });
       }
 
       if (row.eventStatus === 'MISSING_CHECKIN') missingCheckIn += 1;
@@ -507,32 +547,6 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
       }
       seenInThisPull.add(dayKey);
 
-      const hash = rowHash(row);
-
-      // Archive every source event verbatim. A stable event hash makes the raw
-      // archive idempotent while retaining all events that formed one workday.
-      if (!options.dryRun) {
-        const rawEvents = row.sourceEvents?.length ? row.sourceEvents : [null];
-        for (const event of rawEvents) {
-          const eventHash = event ? sourceEventHash(event) : hash;
-          const archived = await prisma.attendanceRawData.findFirst({ where: { rowHash: eventHash } });
-          if (!archived) {
-            await prisma.attendanceRawData.create({
-              data: {
-                syncId: sync?.id ?? null,
-                employeeCode: row.employeeCode,
-                rawDate: event?.date ?? row.date,
-                rawCheckIn: event?.type.toLowerCase() === 'checkin' ? event.time : row.checkIn,
-                rawCheckOut: event?.type.toLowerCase() === 'checkout' ? event.time : row.checkOut,
-                rowHash: eventHash,
-                sheetRow: event?.sheetRow ?? row.sheetRow,
-                payload: (event ?? row) as unknown as object,
-              },
-            });
-          }
-        }
-      }
-
       const existing = await prisma.attendanceRecord.findUnique({
         where: { employee_work_date: { employeeId: employee.id, workDate } },
       });
@@ -574,26 +588,6 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
       const checkIn = parseSheetTime(workDate, row.checkIn);
       const checkOut = parseSheetTime(workDate, row.checkOut);
 
-      // Unchanged since the last sync - skip the write entirely.
-      if (
-        existing &&
-        !existing.isCorrected &&
-        existing.originalCheckIn?.getTime() === checkIn?.getTime() &&
-        existing.originalCheckOut?.getTime() === checkOut?.getTime()
-      ) {
-        duplicates += 1;
-        addPreview({
-          row: row.sheetRow,
-          employeeCode: row.employeeCode,
-          employeeName: employee.name,
-          date: dayjs.utc(workDate).format('YYYY-MM-DD'),
-          action: 'DUPLICATE',
-          checkIn: row.checkIn,
-          checkOut: row.checkOut,
-        });
-        continue;
-      }
-
       const dateKey = dayjs.utc(workDate).format('YYYY-MM-DD');
       const isHoliday = holidaySet.has(dateKey);
       const weekend = !isScheduledWorkday(workDate, settings);
@@ -611,9 +605,30 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
           isOnLeave,
           otEligible: employee.otEligible,
           employmentType: employee.employmentType,
+          actualWorkedMinutes: row.completedWorkedMinutes,
+          hasOpenSession: row.hasOpenSession,
+          malformedSequence: row.malformedSequence,
         },
         settings
       );
+
+      // Compare the complete derived day, not merely its first IN/last OUT.
+      // A later same-day IN can leave those boundary fields unchanged while
+      // legitimately moving the day back to MISSING_DATA / in progress.
+      if (
+        existing &&
+        !existing.isCorrected &&
+        existing.originalCheckIn?.getTime() === checkIn?.getTime() &&
+        existing.originalCheckOut?.getTime() === checkOut?.getTime() &&
+        existing.workedMinutes === metrics.workedMinutes &&
+        existing.status === metrics.status &&
+        existing.isMissingCheckIn === metrics.isMissingCheckIn &&
+        existing.isMissingCheckOut === metrics.isMissingCheckOut
+      ) {
+        duplicates += 1;
+        addPreview({ ...previewBase, action: 'DUPLICATE' });
+        continue;
+      }
 
       if (options.dryRun) {
         if (existing) updated += 1;

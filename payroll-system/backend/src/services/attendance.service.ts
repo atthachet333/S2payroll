@@ -13,6 +13,7 @@ import {
 import { badRequest, codedConflict, notFound } from '../utils/errors.js';
 import { getDayType, isScheduledWorkday } from './schedule-policy.service.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
+import { attachAttendanceSessions } from './attendance-sessions.service.js';
 
 export interface AttendanceMetrics {
   workedMinutes: number;
@@ -36,6 +37,12 @@ export interface MetricsInput {
   isOnLeave: boolean;
   otEligible?: boolean;
   employmentType?: EmploymentType;
+  /** Sum of completed sessions for an event-based day. */
+  actualWorkedMinutes?: number;
+  /** At least one valid IN has not received its matching OUT yet. */
+  hasOpenSession?: boolean;
+  /** Punch order is unsafe (for example IN, IN or OUT, OUT). */
+  malformedSequence?: boolean;
 }
 
 /**
@@ -152,6 +159,14 @@ export function computeAttendanceMetrics(
   }
 
   if (!checkIn && !checkOut) {
+    if (input.malformedSequence) {
+      return {
+        ...base,
+        isMissingCheckIn: true,
+        isMissingCheckOut: true,
+        status: AttendanceStatus.MISSING_DATA,
+      };
+    }
     if (isHoliday) return { ...base, isMissingCheckIn: false, isMissingCheckOut: false, status: AttendanceStatus.HOLIDAY };
     // `isWeekend` means "not a scheduled working day", derived from the
     // WORKING_DAYS setting by schedule-policy.service. Nobody is expected to
@@ -178,22 +193,24 @@ export function computeAttendanceMetrics(
   }
 
   // Exactly one punch present - we cannot compute a duration, so flag it for review.
-  if (!checkIn || !checkOut) {
+  // A multi-session day can still have completed minutes and a later open IN;
+  // continue in that case so those completed minutes remain visible.
+  if ((!checkIn || !checkOut) && input.actualWorkedMinutes === undefined) {
     return { ...base, status: AttendanceStatus.MISSING_DATA };
   }
 
   // A check-out before the check-in means an overnight shift; roll it forward a day.
-  let outMoment = dayjs.utc(checkOut);
-  const inMoment = dayjs.utc(checkIn);
-  if (outMoment.isBefore(inMoment)) outMoment = outMoment.add(1, 'day');
+  let outMoment = dayjs.utc(checkOut ?? checkIn ?? input.workDate);
+  const inMoment = dayjs.utc(checkIn ?? checkOut ?? input.workDate);
+  if (checkIn && checkOut && outMoment.isBefore(inMoment)) outMoment = outMoment.add(1, 'day');
 
   // Attendance is reviewed and corrected at HH:mm precision. Ignore source
   // seconds at both boundaries so 09:15:52 -> 12:23:08 reconciles with the
   // displayed 09:15 -> 12:23 duration of 188 minutes.
-  const rawMinutes = Math.max(
-    0,
-    outMoment.startOf('minute').diff(inMoment.startOf('minute'), 'minute')
-  );
+  const rawMinutes = input.actualWorkedMinutes ?? Math.max(
+      0,
+      outMoment.startOf('minute').diff(inMoment.startOf('minute'), 'minute')
+    );
   const isDaily = input.employmentType === EmploymentType.DAILY;
   const configuredBreak = settings.number('BREAK_MINUTES');
   const standardMinutes = Math.round(settings.decimal('STANDARD_WORK_HOURS').times(60).toNumber());
@@ -234,8 +251,8 @@ export function computeAttendanceMetrics(
     otMinutes = otEnabled ? overflow : 0;
 
     if (!isDaily) {
-      const arrival = minutesSinceMidnight(checkIn);
-      const departure = outMoment.isSame(inMoment, 'day')
+      const arrival = minutesSinceMidnight(checkIn!);
+      const departure = checkOut && outMoment.isSame(inMoment, 'day')
         ? minutesSinceMidnight(outMoment.toDate())
         : null;
       const monthly = evaluateMonthlyAttendance(arrival, departure, settings);
@@ -260,6 +277,8 @@ export function computeAttendanceMetrics(
   if (otMinutes > 0) status = AttendanceStatus.OT;
   if (lateMinutes > 0) status = AttendanceStatus.LATE;
 
+  if (input.hasOpenSession || input.malformedSequence) status = AttendanceStatus.MISSING_DATA;
+
   return {
     workedMinutes,
     normalMinutes,
@@ -268,7 +287,7 @@ export function computeAttendanceMetrics(
     lateMinutes,
     earlyLeaveMinutes,
     isMissingCheckIn: false,
-    isMissingCheckOut: false,
+    isMissingCheckOut: Boolean(input.hasOpenSession || input.malformedSequence),
     isAbsent: false,
     status,
   };
@@ -351,14 +370,14 @@ export async function listAttendance(params: AttendanceListParams) {
   const clock = companyClock();
   const todaySettings = await loadSettingsForDate(new Date(`${clock.date}T00:00:00.000Z`));
   const closeMinutes = monthlyEndMinutes(todaySettings) + Math.max(0, todaySettings.number('ATTENDANCE_CLOSE_GRACE_MINUTES'));
-  const effectiveItems = items.map((item) => ({
+  const effectiveItems = await attachAttendanceSessions(items.map((item) => ({
     ...item,
     status:
       item.status === 'MISSING_DATA' && item.checkIn && !item.checkOut &&
       formatDateOnly(item.workDate) === clock.date && clock.minutes < closeMinutes
         ? 'IN_PROGRESS' as const
         : item.status,
-  }));
+  })));
 
   // What each day was worth, valued on the server. The table never derives
   // money itself - one formula, owned by the backend, keeps the Attendance
@@ -420,8 +439,9 @@ export async function getAttendanceById(id: string) {
     editors.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim() || u.email])
   );
 
+  const [withSessions] = await attachAttendanceSessions([record]);
   return {
-    ...record,
+    ...withSessions,
     adjustments: record.adjustments.map((a) => ({
       ...a,
       changedByName: editorById.get(a.changedBy) ?? null,

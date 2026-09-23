@@ -29,8 +29,16 @@ export const MIN_SYNC_INTERVAL_SECONDS = 30;
 export const DEFAULT_SYNC_INTERVAL_SECONDS = 60;
 
 export type SyncSourceName = 'employees' | 'attendance' | 'leave';
+export type SyncOverallStatus = 'IDLE' | 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED';
+
+export function overallSyncStatus(failedSources: number, totalSources = 3): SyncOverallStatus {
+  if (failedSources <= 0) return 'SUCCESS';
+  if (failedSources >= totalSources) return 'FAILED';
+  return 'PARTIAL';
+}
 
 export interface SyncSourceStatus {
+  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED';
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
   lastSuccessfulAt: string | null;
@@ -42,6 +50,7 @@ export interface SyncSourceStatus {
 }
 
 export interface AutoSyncStatus {
+  overall: SyncOverallStatus;
   enabled: boolean;
   running: boolean;
   intervalSeconds: number;
@@ -57,6 +66,7 @@ export interface AutoSyncStatus {
 }
 
 const emptySource = (): SyncSourceStatus => ({
+  status: 'IDLE',
   lastStartedAt: null,
   lastCompletedAt: null,
   lastSuccessfulAt: null,
@@ -91,6 +101,7 @@ class AutoSyncScheduler {
   private logger: FastifyBaseLogger | null = null;
 
   private status: AutoSyncStatus = {
+    overall: 'IDLE',
     enabled: false,
     running: false,
     intervalSeconds: DEFAULT_SYNC_INTERVAL_SECONDS,
@@ -184,19 +195,21 @@ class AutoSyncScheduler {
     }
     this.running = true;
     this.status.running = true;
+    this.status.overall = 'RUNNING';
     this.status.lastStartedAt = new Date().toISOString();
 
     // Each source runs independently: one failing source must not stop the
     // others, and must never propagate out of the cycle.
-    let anyFailed = false;
+    let failedSources = 0;
     for (const source of ['employees', 'attendance', 'leave'] as const) {
       const ok = await this.runSource(source);
-      if (!ok) anyFailed = true;
+      if (!ok) failedSources += 1;
     }
 
     this.status.cyclesRun += 1;
     this.status.lastCompletedAt = new Date().toISOString();
-    if (anyFailed) {
+    this.status.overall = overallSyncStatus(failedSources);
+    if (failedSources > 0) {
       this.status.lastErrorAt = this.status.lastCompletedAt;
     } else {
       this.status.lastSuccessfulAt = this.status.lastCompletedAt;
@@ -209,6 +222,7 @@ class AutoSyncScheduler {
 
   private async runSource(source: SyncSourceName): Promise<boolean> {
     const entry = this.status.sources[source];
+    entry.status = 'RUNNING';
     entry.lastStartedAt = new Date().toISOString();
     try {
       const counts = await this.executeSource(source);
@@ -216,12 +230,14 @@ class AutoSyncScheduler {
       entry.lastCompletedAt = new Date().toISOString();
       entry.lastSuccessfulAt = entry.lastCompletedAt;
       entry.lastErrorSummary = null;
+      entry.status = 'SUCCESS';
       return true;
     } catch (error) {
       const summary = safeErrorSummary(error);
       entry.lastCompletedAt = new Date().toISOString();
       entry.lastErrorAt = entry.lastCompletedAt;
       entry.lastErrorSummary = summary;
+      entry.status = 'FAILED';
       this.status.lastErrorSummary = summary;
       this.logger?.warn({ source, summary }, 'Auto-sync source failed');
       return false;

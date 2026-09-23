@@ -46,6 +46,16 @@ export interface ResolvedAttendanceDay {
   status: EventResolutionStatus;
   reason: string;
   workHoursWarning: string | null;
+  sessions: ResolvedAttendanceSession[];
+  completedWorkedMinutes: number;
+  hasOpenSession: boolean;
+  malformedSequence: boolean;
+}
+
+export interface ResolvedAttendanceSession {
+  checkIn: AttendanceSourceEvent | null;
+  checkOut: AttendanceSourceEvent | null;
+  durationMinutes: number;
 }
 
 const normaliseType = (value: string): 'checkin' | 'checkout' | null => {
@@ -113,6 +123,43 @@ const eventOrder = (event: AttendanceSourceEvent): number => {
   }
   return Number.MAX_SAFE_INTEGER - 10_000 + event.sheetRow;
 };
+
+/** Pair punches strictly in chronological order without inventing a timestamp. */
+export function pairAttendanceEvents(events: AttendanceSourceEvent[]): {
+  sessions: ResolvedAttendanceSession[];
+  malformedSequence: boolean;
+  issues: string[];
+} {
+  const sessions: ResolvedAttendanceSession[] = [];
+  const issues: string[] = [];
+  let open: ResolvedAttendanceSession | null = null;
+
+  for (const event of [...events].sort((a, b) => eventOrder(a) - eventOrder(b))) {
+    const type = normaliseType(event.type);
+    if (!type || !validTime(event.time)) continue;
+    if (type === 'checkin') {
+      if (open) issues.push(`IN ซ้ำที่แถว ${event.sheetRow}`);
+      open = { checkIn: event, checkOut: null, durationMinutes: 0 };
+      sessions.push(open);
+      continue;
+    }
+    if (!open) {
+      issues.push(`OUT โดยไม่มี IN ที่แถว ${event.sheetRow}`);
+      sessions.push({ checkIn: null, checkOut: event, durationMinutes: 0 });
+      continue;
+    }
+    const start = timeMinutes(open.checkIn!.time)!;
+    const end = timeMinutes(event.time)!;
+    if (end < start) {
+      issues.push(`OUT ก่อน IN ที่แถว ${event.sheetRow}`);
+    } else {
+      open.checkOut = event;
+      open.durationMinutes = end - start;
+    }
+    open = null;
+  }
+  return { sessions, malformedSequence: issues.length > 0, issues };
+}
 
 function compareWorkHours(
   events: AttendanceSourceEvent[],
@@ -186,6 +233,13 @@ export function resolveEventAttendance(
         duplicateSourceEvents,
       };
 
+      const emptyResolution = {
+        sessions: [] as ResolvedAttendanceSession[],
+        completedWorkedMinutes: 0,
+        hasOpenSession: false,
+        malformedSequence: false,
+      };
+
       if (!base.employeeCode) {
         return {
           ...base,
@@ -196,6 +250,7 @@ export function resolveEventAttendance(
           status: 'INVALID',
           reason: 'ไม่มี empId / employee_code',
           workHoursWarning: null,
+          ...emptyResolution,
         };
       }
       if (!validDate(base.date)) {
@@ -208,6 +263,7 @@ export function resolveEventAttendance(
           status: 'INVALID',
           reason: `รูปแบบวันที่ไม่ถูกต้อง: "${base.date}"`,
           workHoursWarning: null,
+          ...emptyResolution,
         };
       }
 
@@ -220,8 +276,15 @@ export function resolveEventAttendance(
       const checkOutEvents = effectiveEvents.filter(
         (event) => normaliseType(event.type) === 'checkout' && validTime(event.time)
       );
-      const checkIn = checkInEvents.length === 1 ? checkInEvents[0].time : null;
-      const checkOut = checkOutEvents.length === 1 ? checkOutEvents[0].time : null;
+      const paired = pairAttendanceEvents(effectiveEvents);
+      const completeSessions = paired.sessions.filter((session) => session.checkIn && session.checkOut);
+      const checkIn = paired.sessions.find((session) => session.checkIn)?.checkIn?.time ?? null;
+      const checkOut = [...completeSessions].at(-1)?.checkOut?.time ?? null;
+      const hasOpenSession = paired.sessions.some((session) => session.checkIn && !session.checkOut);
+      const completedWorkedMinutes = completeSessions.reduce(
+        (total, session) => total + session.durationMinutes,
+        0
+      );
 
       if (invalidEvents.length > 0) {
         const rows = invalidEvents.map((event) => event.sheetRow).join(', ');
@@ -234,10 +297,14 @@ export function resolveEventAttendance(
           status: 'INVALID',
           reason: `type หรือ time ไม่ถูกต้องที่แถว ${rows}`,
           workHoursWarning: null,
+          sessions: paired.sessions,
+          completedWorkedMinutes,
+          hasOpenSession,
+          malformedSequence: true,
         };
       }
 
-      if (checkInEvents.length > 1 || checkOutEvents.length > 1) {
+      if (paired.malformedSequence && effectiveEvents.length > 1) {
         return {
           ...base,
           checkInEvents,
@@ -245,17 +312,21 @@ export function resolveEventAttendance(
           checkIn,
           checkOut,
           status: 'MULTIPLE_EVENTS',
-          reason: `พบ checkin ${checkInEvents.length} รายการ และ checkout ${checkOutEvents.length} รายการ`,
+          reason: `ลำดับการลงเวลาไม่สมบูรณ์: ${paired.issues.join(', ')}`,
           workHoursWarning: null,
+          sessions: paired.sessions,
+          completedWorkedMinutes,
+          hasOpenSession,
+          malformedSequence: true,
         };
       }
 
       let status: EventResolutionStatus = 'VALID';
       let reason = 'พบ checkin และ checkout อย่างละ 1 รายการ';
-      if (checkInEvents.length === 0 && checkOutEvents.length === 1) {
+      if (checkInEvents.length === 0 && checkOutEvents.length >= 1) {
         status = 'MISSING_CHECKIN';
         reason = 'พบ checkout แต่ไม่พบ checkin';
-      } else if (checkInEvents.length === 1 && checkOutEvents.length === 0) {
+      } else if (hasOpenSession) {
         status = 'MISSING_CHECKOUT';
         reason = 'พบ checkin แต่ไม่พบ checkout';
       } else if (checkInEvents.length === 0 && checkOutEvents.length === 0) {
@@ -272,9 +343,13 @@ export function resolveEventAttendance(
         status,
         reason,
         workHoursWarning:
-          status === 'VALID'
+          status === 'VALID' && paired.sessions.length === 1
             ? compareWorkHours(ordered, checkIn, checkOut, workHoursMismatchMinutes)
             : null,
+        sessions: paired.sessions,
+        completedWorkedMinutes,
+        hasOpenSession,
+        malformedSequence: paired.malformedSequence,
       };
     })
     .sort((a, b) =>

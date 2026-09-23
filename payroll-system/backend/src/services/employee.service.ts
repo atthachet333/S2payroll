@@ -14,6 +14,7 @@ import type { Actor } from './payroll.service.js';
 import { loadSettings } from './settings.service.js';
 import { floorToInterval, roundingIntervalMinutes } from '../utils/time-rounding.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
+import { attachAttendanceSessions } from './attendance-sessions.service.js';
 
 export interface EmployeeListParams {
   /** Master-data completeness, evaluated by employee-completeness.service. */
@@ -444,8 +445,9 @@ export async function employeeAttendanceHistory(
     where: { id },
     select: { id: true, employmentType: true, attendanceRequired: true },
   });
+  const effectiveItems = await attachAttendanceSessions(items);
   const valuations = await valueAttendanceRecords(
-    items.map((item) => ({
+    effectiveItems.map((item) => ({
       id: item.id,
       employeeId: item.employeeId,
       workDate: item.workDate,
@@ -460,7 +462,7 @@ export async function employeeAttendanceHistory(
   );
 
   return {
-    items: items.map((item) => ({ ...item, dailyPay: valuations.get(item.id) ?? null })),
+    items: effectiveItems.map((item) => ({ ...item, dailyPay: valuations.get(item.id) ?? null })),
     total,
     page,
     pageSize,

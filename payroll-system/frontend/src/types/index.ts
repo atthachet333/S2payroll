@@ -289,6 +289,12 @@ export interface AttendanceRecord {
   statusOverride?: boolean;
   isLocked: boolean;
   note: string | null;
+  sessions?: AttendanceSession[];
+  sessionCount?: number;
+  completedWorkedMinutes?: number;
+  hasOpenSession?: boolean;
+  malformedSequence?: boolean;
+  attendanceIssues?: string[];
   /** Server-valued day earning. Absent on endpoints that do not value rows. */
   dailyPay?: DailyPay | null;
   employee?: {
@@ -303,6 +309,16 @@ export interface AttendanceRecord {
     department?: { id: string; name: string } | null;
   };
   adjustments?: AttendanceAdjustment[];
+}
+
+export interface AttendanceSession {
+  checkIn: string | null;
+  checkOut: string | null;
+  workedMinutes: number;
+  checkInRawId: string | null;
+  checkOutRawId: string | null;
+  checkInClientRequestId: string | null;
+  checkOutClientRequestId: string | null;
 }
 
 export interface AttendanceAdjustment {

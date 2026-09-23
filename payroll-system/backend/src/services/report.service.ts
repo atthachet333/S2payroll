@@ -5,6 +5,7 @@ import { dec, money } from '../utils/money.js';
 import { dayjs } from '../utils/datetime.js';
 import { notFound } from '../utils/errors.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
+import { attachAttendanceSessions } from './attendance-sessions.service.js';
 
 export type ReportType =
   | 'payroll-summary'
@@ -302,9 +303,10 @@ async function attendanceReport(
     },
     orderBy: [{ employeeCode: 'asc' }, { workDate: 'asc' }],
   });
+  const effectiveRecords = await attachAttendanceSessions(records);
 
   const employeesById = new Map(
-    records.map((record) => [
+    effectiveRecords.map((record) => [
       record.employeeId,
       {
         id: record.employee.id,
@@ -313,7 +315,7 @@ async function attendanceReport(
       },
     ])
   );
-  const dailyPay = await valueAttendanceRecords(records, employeesById);
+  const dailyPay = await valueAttendanceRecords(effectiveRecords, employeesById);
 
   if (variant === 'summary') {
     return {
@@ -327,12 +329,13 @@ async function attendanceReport(
         { key: 'check_in', header: 'เวลาเข้า', width: 12 },
         { key: 'check_out', header: 'เวลาออก', width: 12 },
         { key: 'worked_hours', header: 'ชั่วโมงทำงาน', width: 14, numeric: true },
+        { key: 'session_count', header: 'จำนวนรอบ', width: 10, numeric: true },
         { key: 'late_minutes', header: 'นาทีมาสาย', width: 12, numeric: true },
         { key: 'status', header: 'สถานะ', width: 16 },
         { key: 'daily_pay', header: 'ได้เงินวันนี้', width: 16, numeric: true, format: 'currency' },
         { key: 'daily_pay_status', header: 'สถานะค่าจ้างรายวัน', width: 18 },
       ],
-      rows: records.map((record) => {
+      rows: effectiveRecords.map((record) => {
         const pay = dailyPay.get(record.id);
         return {
           work_date: dayjs.utc(record.workDate).format('YYYY-MM-DD'),
@@ -341,7 +344,8 @@ async function attendanceReport(
           department: record.employee.department?.name ?? '-',
           check_in: record.checkIn ? dayjs.utc(record.checkIn).format('HH:mm') : '-',
           check_out: record.checkOut ? dayjs.utc(record.checkOut).format('HH:mm') : '-',
-          worked_hours: (record.workedMinutes / 60).toFixed(2),
+          worked_hours: (record.completedWorkedMinutes / 60).toFixed(2),
+          session_count: record.sessionCount,
           late_minutes: record.lateMinutes,
           status: record.status,
           daily_pay: pay?.status === 'CALCULATED' ? pay.net : '',

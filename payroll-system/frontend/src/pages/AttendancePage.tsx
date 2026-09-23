@@ -33,6 +33,7 @@ import {
   Textarea,
 } from '@/components/ui';
 import DailyPayCell from '@/features/attendance/DailyPayCell';
+import AttendanceSessions from '@/features/attendance/AttendanceSessions';
 import { AttendanceStatusBadge } from '@/components/StatusBadge';
 import { formatDate, formatDateTime, formatDateWithWeekday, formatMinutes, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
 import type { AttendanceRecord, AttendanceSummary } from '@/types';
@@ -319,12 +320,18 @@ export default function AttendancePage() {
                           </td>
                           <td className="whitespace-nowrap"><EmploymentTypeBadge type={record.employee?.employmentType} /></td>
                           <td className={`whitespace-nowrap tabular-nums ${record.isMissingCheckIn ? 'text-danger' : ''}`}>
-                            {formatTime(record.checkIn)}
+                            <div className="flex items-center gap-1">
+                              {formatTime(record.checkIn)}
+                              <AttendanceSessions record={record} />
+                            </div>
                           </td>
                           <td className={`whitespace-nowrap tabular-nums ${record.isMissingCheckOut ? 'text-danger' : ''}`}>
                             {formatTime(record.checkOut)}
                           </td>
-                          <td className="num">{formatMinutes(record.workedMinutes)}</td>
+                          <td className="num">
+                            {formatMinutes(record.completedWorkedMinutes ?? record.workedMinutes)}
+                            {record.hasOpenSession && <span className="ml-1 text-info">+ กำลังทำงาน</span>}
+                          </td>
                           <td className="num text-info">
                             {record.otMinutes > 0 ? formatMinutes(record.otMinutes) : '-'}
                           </td>

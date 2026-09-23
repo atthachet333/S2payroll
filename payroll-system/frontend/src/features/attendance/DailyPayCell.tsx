@@ -45,9 +45,10 @@ export function DailyPayCell({ dailyPay }: { dailyPay: DailyPay | null | undefin
   }
 
   if (dailyPay.status === 'NOT_APPLICABLE') {
+    const pending = dailyPay.note === 'ข้อมูลเวลายังไม่ครบ';
     return (
-      <span className="text-muted-foreground" title={dailyPay.note ?? undefined}>
-        -
+      <span className={pending ? 'text-info' : 'text-muted-foreground'} title={dailyPay.note ?? undefined}>
+        {pending ? 'กำลังคำนวณ' : '-'}
       </span>
     );
   }
