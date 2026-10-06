@@ -212,7 +212,7 @@ export default async function employeeRoutes(app: FastifyInstance): Promise<void
       const { id } = request.params as { id: string };
       const body = deactivateSchema.parse(request.body);
       return reply.send(
-        await employeeService.deactivateEmployee(id, body.reason, getActor(request))
+        await employeeService.deactivateEmployee(id, body, getActor(request))
       );
     }
   );

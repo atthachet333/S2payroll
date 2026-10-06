@@ -135,8 +135,8 @@ describe('DAILY hourly rate presets', () => {
 // ---------------------------------------------------------------------------
 
 describe('DAILY pay from worked minutes', () => {
-  // Payable minutes drive the money: a day over eight hours loses an unpaid
-  // hour, and what remains is floored to 15 minutes. 540 worked is therefore
+  // Payable minutes drive the money: a DAILY day over four hours must account
+  // for a 60-minute break, and what remains is floored to 15 minutes. 540 worked is therefore
   // 480 paid, not 540.
   const cases: [number, number, string][] = [
     [60, 60, '60.00'],
@@ -144,7 +144,7 @@ describe('DAILY pay from worked minutes', () => {
     [93, 30, '46.50'],
     [100, 540, '800.00'],
     [60, 540, '480.00'],
-    [60, 480, '480.00'],
+    [60, 480, '420.00'],
     [75, 540, '600.00'],
   ];
 
@@ -172,13 +172,13 @@ describe('DAILY pay from worked minutes', () => {
       [profile('75', '2026-01-01')]
     );
     // 540 -> break 60 -> 480 payable -> 600.00
-    // 480 -> no break     -> 480 payable -> 600.00
-    // 315 -> no break     -> 315 payable -> 393.75
-    expect(summary.totalAmount.toFixed(2)).toBe('1593.75');
+    // 480 -> break 60 -> 420 payable -> 525.00
+    // 315 -> break 60 -> 255 payable -> 318.75
+    expect(summary.totalAmount.toFixed(2)).toBe('1443.75');
     // The observed durations are reported untouched alongside the paid ones.
     expect(summary.totalWorkedMinutes).toBe(1335);
-    expect(summary.totalBreakDeductionMinutes).toBe(60);
-    expect(summary.totalPayableMinutes).toBe(1275);
+    expect(summary.totalBreakDeductionMinutes).toBe(180);
+    expect(summary.totalPayableMinutes).toBe(1155);
     expect(summary.workedDays).toBe(3);
   });
 });
@@ -210,8 +210,8 @@ describe('rate history by work date', () => {
       [day('2026-08-10', 480), day('2026-08-20', 480)],
       profiles
     );
-    // 8h x 60 + 8h x 75 = 480 + 600. Repricing the whole month at 75 would give 960.
-    expect(summary.totalAmount.toFixed(2)).toBe('1080.00');
+    // Both days pay 420 minutes after the required break: 420 + 525.
+    expect(summary.totalAmount.toFixed(2)).toBe('945.00');
   });
 
   it('reports a day no rate covers as unrated instead of pricing it at 0', () => {
@@ -222,7 +222,7 @@ describe('rate history by work date', () => {
     expect(summary.unratedDays).toBe(1);
     expect(summary.unratedMinutes).toBe(480);
     // Only the covered day reached money; the uncovered one still shows its time.
-    expect(summary.totalAmount.toFixed(2)).toBe('600.00');
+    expect(summary.totalAmount.toFixed(2)).toBe('525.00');
     expect(summary.rows[0].rateConfigured).toBe(false);
     expect(summary.rows[0].workedMinutes).toBe(480);
   });
@@ -570,6 +570,10 @@ describe('DAILY employee payroll', () => {
           amount: '5893.75',
           totalWorkedMinutes: 4715,
           totalBreakDeductionMinutes: 0,
+          totalSessionGapMinutes: 0,
+          totalRequiredBreakMinutes: 0,
+          totalCreditedBreakMinutes: 0,
+          totalAdditionalBreakDeductionMinutes: 0,
           totalPayableMinutes: 4715,
           totalRoundedAwayMinutes: 0,
           ratedMinutes: 4715,
@@ -581,7 +585,8 @@ describe('DAILY employee payroll', () => {
       plainSettings()
     );
     expect(result.baseSalary.toFixed(2)).toBe('5893.75');
-    expect(result.netSalary.toFixed(2)).toBe('5893.75');
+    expect(result.netPayBeforeRounding.toFixed(2)).toBe('5893.75');
+    expect(result.payableNet.toFixed(0)).toBe('5894');
     expect(result.status).toBe('READY');
   });
 
@@ -601,6 +606,10 @@ describe('DAILY employee payroll', () => {
           amount: '0',
           totalWorkedMinutes: 4715,
           totalBreakDeductionMinutes: 0,
+          totalSessionGapMinutes: 0,
+          totalRequiredBreakMinutes: 0,
+          totalCreditedBreakMinutes: 0,
+          totalAdditionalBreakDeductionMinutes: 0,
           totalPayableMinutes: 0,
           totalRoundedAwayMinutes: 0,
           ratedMinutes: 0,
@@ -634,6 +643,10 @@ describe('DAILY employee payroll', () => {
           amount: '600.00',
           totalWorkedMinutes: 960,
           totalBreakDeductionMinutes: 0,
+          totalSessionGapMinutes: 0,
+          totalRequiredBreakMinutes: 0,
+          totalCreditedBreakMinutes: 0,
+          totalAdditionalBreakDeductionMinutes: 0,
           totalPayableMinutes: 480,
           totalRoundedAwayMinutes: 0,
           ratedMinutes: 480,

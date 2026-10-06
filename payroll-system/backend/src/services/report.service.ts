@@ -6,6 +6,7 @@ import { dayjs } from '../utils/datetime.js';
 import { notFound } from '../utils/errors.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
+import { payrollEmployeeVisibilityWhere } from './employee-payroll-eligibility.service.js';
 
 export type ReportType =
   | 'payroll-summary'
@@ -75,7 +76,11 @@ export type DetailedPayrollReportRow = Record<string, string | number> & {
   /** The true observed duration. Never the payable figure. */
   worked_hours: string;
   actual_worked_minutes: number;
-  /** DAILY only: the unpaid break removed, and the minutes actually paid for. */
+  session_gap_minutes: number;
+  required_break_minutes: number;
+  credited_break_minutes: number;
+  additional_break_deduction_minutes: number;
+  /** Backwards-compatible alias of additional_break_deduction_minutes. */
   break_deduction_minutes: number;
   rounded_away_minutes: number;
   payable_minutes: number;
@@ -108,6 +113,8 @@ export type DetailedPayrollReportRow = Record<string, string | number> & {
   tax: string;
   other_deduction: string;
   total_deduction: string;
+  net_before_rounding?: string;
+  rounding_adjustment?: string;
   net_salary: string;
   _pay_configured: number;
 };
@@ -135,8 +142,17 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
 
   const rows = await prisma.payrollEmployee.findMany({
     where: {
-      ...(period ? { periodId: period.id } : {}),
-      ...(params.departmentId ? { employee: { departmentId: params.departmentId } } : {}),
+      ...(period
+        ? {
+            periodId: period.id,
+            ...payrollEmployeeVisibilityWhere(
+              period,
+              params.departmentId ? { departmentId: params.departmentId } : undefined
+            ),
+          }
+        : params.departmentId
+          ? { employee: { departmentId: params.departmentId } }
+          : {}),
       ...(params.employmentType ? { employmentType: params.employmentType as any } : {}),
       ...(params.status ? { status: params.status as any } : {}),
     },
@@ -164,6 +180,10 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
       // the employee actually worked, and nobody reading the file would know.
       worked_hours: r.workingHours.toString(),
       actual_worked_minutes: Math.round(Number(r.workingHours) * 60),
+      session_gap_minutes: r.sessionGapMinutes,
+      required_break_minutes: r.requiredBreakMinutes,
+      credited_break_minutes: r.creditedBreakMinutes,
+      additional_break_deduction_minutes: r.additionalBreakDeductionMinutes,
       break_deduction_minutes: r.breakDeductionMinutes,
       rounded_away_minutes: r.roundedAwayMinutes,
       payable_minutes: r.payableMinutes,
@@ -194,6 +214,8 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
       tax: money(r.tax).toFixed(2),
       other_deduction: money(dec(r.loanDeduction).plus(r.otherDeduction)).toFixed(2),
       total_deduction: money(r.totalDeduction).toFixed(2),
+      net_before_rounding: money(r.netSalaryBeforeRounding ?? r.netSalary).toFixed(2),
+      rounding_adjustment: money(r.roundingAdjustment ?? 0).toFixed(2),
       net_salary: money(r.netSalary).toFixed(2),
       _pay_configured: r.payConfigured ? 1 : 0,
     };
@@ -216,7 +238,10 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
       { key: 'working_days', header: 'วันทำงานในรอบ', width: 14, numeric: true },
       { key: 'present_days', header: 'วันที่มาทำงาน', width: 14, numeric: true },
       { key: 'worked_hours', header: 'ชั่วโมงทำงานจริง', width: 16, numeric: true },
-      { key: 'break_deduction_minutes', header: 'นาทีพักที่หัก', width: 14, numeric: true },
+      { key: 'session_gap_minutes', header: 'พักจากการออกงานจริง (นาที)', width: 22, numeric: true },
+      { key: 'required_break_minutes', header: 'พักที่บริษัทกำหนด (นาที)', width: 20, numeric: true },
+      { key: 'credited_break_minutes', header: 'พักจริงที่นับเป็นเครดิต (นาที)', width: 23, numeric: true },
+      { key: 'additional_break_deduction_minutes', header: 'พักที่ระบบหักเพิ่ม (นาที)', width: 21, numeric: true },
       { key: 'rounded_away_minutes', header: 'นาทีที่ปัดออก', width: 14, numeric: true },
       { key: 'payable_hours', header: 'ชั่วโมงคิดค่าจ้าง', width: 16, numeric: true },
       { key: 'approved_ot_actual_minutes', header: 'นาที OT จริง', width: 13, numeric: true },
@@ -243,7 +268,9 @@ async function payrollSummaryReport(params: ReportParams): Promise<ReportData> {
       { key: 'tax', header: 'ภาษี', width: 14, numeric: true, format: 'currency' },
       { key: 'other_deduction', header: 'รายการหักอื่น', width: 16, numeric: true, format: 'currency' },
       { key: 'total_deduction', header: 'รายการหักรวม', width: 16, numeric: true, format: 'currency' },
-      { key: 'net_salary', header: 'เงินสุทธิ', width: 16, numeric: true, format: 'currency' },
+      { key: 'net_before_rounding', header: 'ยอดสุทธิก่อนปัด', width: 18, numeric: true, format: 'currency' },
+      { key: 'rounding_adjustment', header: 'ปรับเศษ', width: 14, numeric: true, format: 'currency' },
+      { key: 'net_salary', header: 'ยอดจ่ายจริง', width: 16, numeric: true, format: 'currency' },
     ],
     rows: data,
     totals: {

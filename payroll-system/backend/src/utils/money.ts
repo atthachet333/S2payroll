@@ -48,6 +48,26 @@ export const sum = (...values: Numeric[]): Decimal =>
 
 export const sumMoney = (...values: Numeric[]): Decimal => money(sum(...values));
 
+export interface FinalPayAmounts {
+  /** Exact employee net after all cent-precision components are summed. */
+  netPayBeforeRounding: Decimal;
+  /** payableNet - netPayBeforeRounding; retained for audit/display. */
+  roundingAdjustment: Decimal;
+  /** Authoritative amount to transfer, rounded HALF_UP to a whole baht. */
+  payableNet: Decimal;
+}
+
+/** The single final-pay rounding policy. Never use this for a component. */
+export function finalPay(value: Numeric): FinalPayAmounts {
+  const netPayBeforeRounding = money(value);
+  const payableNet = netPayBeforeRounding.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+  return {
+    netPayBeforeRounding,
+    roundingAdjustment: money(payableNet.minus(netPayBeforeRounding)),
+    payableNet,
+  };
+}
+
 /** Serialise a Decimal for JSON responses as a fixed 2 dp string. */
 export const moneyString = (value: Numeric): string => money(value).toFixed(2);
 

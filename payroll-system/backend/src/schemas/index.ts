@@ -86,6 +86,7 @@ export const employeeQuerySchema = paginationSchema.extend({
 });
 
 export const deactivateSchema = z.object({
+  endDate: dateString,
   reason: z.string().min(3, 'กรุณาระบุเหตุผล').max(500),
 });
 
@@ -167,15 +168,28 @@ export const periodSuggestQuerySchema = z.object({
 
 export const payrollEmployeeStatusSchema = z.enum([
   'READY',
+  'PARTIAL',
+  'UNCONFIGURED',
+  'ATTENDANCE_INCOMPLETE',
   'NEEDS_REVIEW',
   'MISSING_DATA',
   'EXCLUDED',
 ]);
 
+const optionalBooleanQuery = z.preprocess(
+  (value) => value === 'true' ? true : value === 'false' ? false : value,
+  z.boolean().optional()
+);
+
+export const payrollVisibilityQuerySchema = z.object({
+  includeInactive: optionalBooleanQuery,
+});
+
 export const periodEmployeeQuerySchema = paginationSchema.extend({
   search: z.string().optional(),
   departmentId: z.string().uuid().optional(),
   status: payrollEmployeeStatusSchema.optional(),
+  includeInactive: optionalBooleanQuery,
 });
 
 export const adjustableFieldSchema = z.enum([

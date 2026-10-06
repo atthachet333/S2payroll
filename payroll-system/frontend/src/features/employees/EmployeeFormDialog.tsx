@@ -281,6 +281,8 @@ export default function EmployeeFormDialog({
       toast.success(isEdit ? 'บันทึกข้อมูลพนักงานแล้ว' : 'เพิ่มพนักงานใหม่เรียบร้อยแล้ว');
       void queryClient.invalidateQueries({ queryKey: ['employees'] });
       void queryClient.invalidateQueries({ queryKey: ['employee'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-summary'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-completeness-summary'] });
       void queryClient.invalidateQueries({ queryKey: ['employee-pay-profiles'] });
       void queryClient.invalidateQueries({ queryKey: ['employee-payroll-policy'] });
       void queryClient.invalidateQueries({ queryKey: ['employee-payroll-policies'] });

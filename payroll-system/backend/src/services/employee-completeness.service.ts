@@ -10,15 +10,15 @@
  * because a day of their attendance is missing a punch. That is a property of
  * the period, not of the employee, and is reported by the pre-payroll check.
  *
- * Compensation note (current schema): Employee has a single `baseSalary`
- * column and no separate dailyRate / hourlyRate fields. The payroll calculator
- * already reads that one column differently per employment type - for DAILY it
- * IS the daily rate, for HOURLY it IS the hourly rate, for MONTHLY/CONTRACT it
- * is the monthly salary. Completeness follows the same interpretation rather
- * than inventing fields that do not exist. `COMPENSATION_FIELD_BY_TYPE` is the
- * single place to change if those columns are ever added.
+ * Compensation is resolved only from the effective EmployeePayProfile. The
+ * legacy employees.baseSalary column remains available for historical display,
+ * but it is not authoritative for completeness.
  */
-import { EmploymentType } from '@prisma/client';
+import { EmploymentType, PayType, type Prisma } from '@prisma/client';
+import {
+  resolveEffectivePayProfile,
+  type PayProfileLike,
+} from './pay-profile-resolution.js';
 
 /** Stable identifiers for a missing field, plus the label an operator reads. */
 export type EmployeeProfileField =
@@ -55,13 +55,12 @@ export const EMPLOYEE_FIELD_LABELS: Record<EmployeeProfileField, string> = {
 /**
  * Which compensation field each pay type requires.
  *
- * All four currently resolve to the same `baseSalary` column; the mapping
- * exists so the label is right today and so dedicated columns can be wired in
- * later without touching the rule.
+ * MONTHLY/CONTRACT require monthlySalary; DAILY/HOURLY require hourlyRate.
+ * Both values come from the effective EmployeePayProfile.
  */
 export const COMPENSATION_FIELD_BY_TYPE: Record<EmploymentType, EmployeeProfileField> = {
   [EmploymentType.MONTHLY]: 'monthlySalary',
-  [EmploymentType.DAILY]: 'dailyRate',
+  [EmploymentType.DAILY]: 'hourlyRate',
   [EmploymentType.HOURLY]: 'hourlyRate',
   [EmploymentType.CONTRACT]: 'monthlySalary',
 };
@@ -69,21 +68,12 @@ export const COMPENSATION_FIELD_BY_TYPE: Record<EmploymentType, EmployeeProfileF
 /**
  * Pay types whose compensation figure is part of MASTER-DATA completeness.
  *
- * Only the salaried types. A monthly salary is an attribute of the employment
- * itself, so a monthly employee without one has an incomplete record. A daily
- * or hourly rate is a payroll configuration that is legitimately settled later,
- * so its absence does not make the employee's master data incomplete.
- *
- * This is emphatically NOT payroll readiness: the pre-payroll check still
- * raises MISSING_DAILY_RATE / MISSING_HOURLY_RATE and still blocks a
- * calculation. The two questions are deliberately separate.
- *
- * CONTRACT follows MONTHLY: the calculator treats it as a fixed monthly figure.
+ * Every non-exempt employee needs the matching effective pay profile. This is
+ * the same type/rate rule used by payroll readiness, while readiness continues
+ * to add period-specific checks such as coverage and attendance.
  */
-export const COMPENSATION_REQUIRED_TYPES: ReadonlySet<EmploymentType> = new Set([
-  EmploymentType.MONTHLY,
-  EmploymentType.CONTRACT,
-]);
+export const COMPENSATION_REQUIRED_TYPES: ReadonlySet<EmploymentType> =
+  new Set(Object.values(EmploymentType));
 
 /** The minimum an employee record needs, whatever their pay type. */
 export const ALWAYS_REQUIRED_FIELDS: EmployeeProfileField[] = [
@@ -117,6 +107,7 @@ export interface CompletenessInput {
   startDate?: Date | string | null;
   status?: string | null;
   baseSalary?: unknown;
+  payProfiles?: readonly PayProfileLike[];
   attendanceRequired?: boolean | null;
   leaveTrackingRequired?: boolean | null;
 }
@@ -154,16 +145,6 @@ const isBlank = (value: unknown): boolean =>
   value === null || value === undefined || String(value).trim() === '';
 
 /** Decimal, string or number - all are accepted and compared numerically. */
-const isPositiveAmount = (value: unknown): boolean => {
-  if (value === null || value === undefined) return false;
-  const parsed = Number(
-    typeof value === 'object' && value !== null && 'toString' in value
-      ? (value as { toString(): string }).toString()
-      : value
-  );
-  return Number.isFinite(parsed) && parsed > 0;
-};
-
 /**
  * Evaluate one employee record.
  *
@@ -178,7 +159,8 @@ const isPositiveAmount = (value: unknown): boolean => {
  * is a policy decision, not absent data.
  */
 export function evaluateEmployeeProfileCompleteness(
-  employee: CompletenessInput
+  employee: CompletenessInput,
+  effectiveDate = new Date()
 ): EmployeeProfileCompleteness {
   const missing: EmployeeProfileField[] = [];
 
@@ -194,14 +176,14 @@ export function evaluateEmployeeProfileCompleteness(
   const exempt = isExemptProfile(employee);
   const payType = (employee.employmentType ?? EmploymentType.MONTHLY) as EmploymentType;
 
-  // Compensation is part of master data only for salaried pay types, and never
-  // for an exempt executive. A daily or hourly rate is payroll configuration
-  // settled later, so its absence is not a gap in the employee's record.
+  // Executives retain the established explicit exemption. Everyone else must
+  // have the right profile type and positive amount in force on this date.
   const compensationRequired = !exempt && COMPENSATION_REQUIRED_TYPES.has(payType);
 
   if (compensationRequired) {
     const compensationField = COMPENSATION_FIELD_BY_TYPE[payType] ?? 'monthlySalary';
-    if (!isPositiveAmount(employee.baseSalary)) missing.push(compensationField);
+    const profile = resolveEffectivePayProfile(employee.payProfiles ?? [], payType, effectiveDate);
+    if (!profile) missing.push(compensationField);
   }
 
   return {
@@ -216,9 +198,15 @@ export function evaluateEmployeeProfileCompleteness(
 
 /** Attach completeness to an employee row without altering it. */
 export function withProfileCompleteness<T extends CompletenessInput>(
-  employee: T
-): T & { profileCompleteness: EmployeeProfileCompleteness } {
-  return { ...employee, profileCompleteness: evaluateEmployeeProfileCompleteness(employee) };
+  employee: T,
+  effectiveDate = new Date()
+): T & { effectivePayProfile: PayProfileLike | null; profileCompleteness: EmployeeProfileCompleteness } {
+  const employmentType = (employee.employmentType ?? EmploymentType.MONTHLY) as EmploymentType;
+  return {
+    ...employee,
+    effectivePayProfile: resolveEffectivePayProfile(employee.payProfiles ?? [], employmentType, effectiveDate),
+    profileCompleteness: evaluateEmployeeProfileCompleteness(employee, effectiveDate),
+  };
 }
 
 export type CompletenessFilter = 'COMPLETE' | 'INCOMPLETE';
@@ -230,7 +218,12 @@ export type CompletenessFilter = 'COMPLETE' | 'INCOMPLETE';
  * Kept next to the rule it mirrors: whenever a required field is added above,
  * the corresponding clause belongs here too. A unit test asserts the two agree.
  */
-export function completenessWhere(filter: CompletenessFilter) {
+export function completenessWhere(filter: CompletenessFilter, effectiveDate = new Date()): Prisma.EmployeeWhereInput {
+  const activeOnDate = {
+    isActive: true,
+    effectiveFrom: { lte: effectiveDate },
+    OR: [{ effectiveTo: null }, { effectiveTo: { gte: effectiveDate } }],
+  };
   const incompleteClauses = [
     { departmentId: null },
     { positionId: null },
@@ -243,9 +236,16 @@ export function completenessWhere(filter: CompletenessFilter) {
     // asserts the two stay in agreement.
     {
       AND: [
-        { baseSalary: { lte: 0 } },
-        { employmentType: { in: [...COMPENSATION_REQUIRED_TYPES] } },
+        { employmentType: { in: [EmploymentType.MONTHLY, EmploymentType.CONTRACT] } },
         { NOT: { AND: [{ attendanceRequired: false }, { leaveTrackingRequired: false }] } },
+        { payProfiles: { none: { ...activeOnDate, payType: PayType.MONTHLY, monthlySalary: { gt: 0 } } } },
+      ],
+    },
+    {
+      AND: [
+        { employmentType: { in: [EmploymentType.DAILY, EmploymentType.HOURLY] } },
+        { NOT: { AND: [{ attendanceRequired: false }, { leaveTrackingRequired: false }] } },
+        { payProfiles: { none: { ...activeOnDate, payType: PayType.HOURLY, hourlyRate: { gt: 0 } } } },
       ],
     },
   ];

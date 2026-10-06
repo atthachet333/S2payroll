@@ -89,7 +89,11 @@ export interface DailyEarningRow {
   checkOut: string | null;
   /** The true observed duration. Never replaced by the payable figure. */
   workedMinutes: number;
-  /** Unpaid break removed because the day ran past eight hours. */
+  requiredBreakMinutes: number;
+  sessionGapMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
+  /** Backwards-compatible alias of additionalBreakDeductionMinutes. */
   breakDeductionMinutes: number;
   minutesBeforeRounding: number;
   /** What the company floor discarded. */
@@ -99,6 +103,8 @@ export interface DailyEarningRow {
   hourlyRate: string | null;
   amount: string;
   rateConfigured: boolean;
+  finalized: boolean;
+  note: string | null;
   status: AttendanceStatus;
 }
 
@@ -121,11 +127,16 @@ export interface DailyPay {
   absenceDeduction: string;
   lateChargedHours: number;
   /**
-   * DAILY only. The unpaid break removed for a day past eight hours, and the
+   * DAILY only. The additional required break removed after session-gap credit, and the
    * minutes actually paid for after the 15-minute floor. The attendance row
    * keeps showing the true observed duration alongside these.
    */
   breakDeductionMinutes: number;
+  actualWorkedMinutes: number;
+  requiredBreakMinutes: number;
+  sessionGapMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
   minutesBeforeRounding: number;
   roundedAwayMinutes: number;
   payableMinutes: number;
@@ -147,11 +158,16 @@ export interface DailyEarnings {
     workedDays: number;
     totalWorkedMinutes: number;
     totalBreakDeductionMinutes: number;
+    totalRequiredBreakMinutes: number;
+    totalSessionGapMinutes: number;
+    totalCreditedBreakMinutes: number;
+    totalAdditionalBreakDeductionMinutes: number;
     totalPayableMinutes: number;
     totalRoundedAwayMinutes: number;
     ratedMinutes: number;
     unratedMinutes: number;
     unratedDays: number;
+    unfinalizedDays: number;
     totalAmount: string;
   } | null;
 }
@@ -248,6 +264,8 @@ export interface Employee {
   payrollPolicy?: EmployeePayrollPolicy | null;
   /** Master-data completeness, decided by the backend - never recomputed here. */
   profileCompleteness?: EmployeeProfileCompleteness;
+  /** Canonical profile in force today, resolved for the current employment type. */
+  effectivePayProfile?: EmployeePayProfile | null;
   lineUserId?: string | null;
   createdAt?: string;
   updatedAt?: string;
@@ -283,6 +301,8 @@ export interface AttendanceRecord {
   isHoliday: boolean;
   isWeekend: boolean;
   status: AttendanceStatus;
+  /** Approved leave category explaining a LEAVE day. */
+  leaveType?: string | null;
   source: string;
   isCorrected: boolean;
   /** True only when a human pinned the status, not merely edited the punches. */
@@ -423,6 +443,10 @@ export interface PayrollEmployee {
   hourlyBase: string;
   /** DAILY only: unpaid break removed, and minutes actually paid for. */
   breakDeductionMinutes: number;
+  sessionGapMinutes: number;
+  requiredBreakMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
   payableMinutes: number;
   roundedAwayMinutes: number;
   /** MONTHLY: lateness observed and after the company floor. */
@@ -439,6 +463,8 @@ export interface PayrollEmployee {
   loanDeduction: string;
   otherDeduction: string;
   totalDeduction: string;
+  netSalaryBeforeRounding: string | null;
+  roundingAdjustment: string | null;
   netSalary: string;
   status: PayrollEmployeeStatus;
   /** False when no wage rate was known - the amounts are not a final salary. */
@@ -447,6 +473,8 @@ export interface PayrollEmployee {
   isEstimate: boolean;
   reviewNotes: string[] | null;
   hasAdjustment: boolean;
+  /** Current master-data status; the financial fields remain period snapshots. */
+  employeeStatus?: EmployeeStatus;
 }
 
 export interface PayrollLine {
@@ -557,7 +585,14 @@ export interface PayslipSnapshot {
   };
   incomes: PayslipLine[];
   deductions: PayslipLine[];
-  totals: { grossIncome: string; totalDeduction: string; netSalary: string };
+  totals: {
+    grossIncome: string;
+    totalDeduction: string;
+    netPayBeforeRounding?: string;
+    roundingAdjustment?: string;
+    payableNet?: string;
+    netSalary: string;
+  };
 }
 
 export interface Payslip {

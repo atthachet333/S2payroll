@@ -21,7 +21,7 @@ import { DEFAULT_SETTINGS_MAP } from '../src/config/payroll-defaults.js';
  * Both are easy to get subtly wrong and impossible to notice afterwards: a
  * round-to-nearest instead of a floor overpays a few baht a day, and a
  * greater-than-or-equal threshold takes an hour off a shift that was exactly
- * eight hours long.
+ * four hours long.
  */
 
 const settings = (overrides: Record<string, string> = {}) =>
@@ -80,35 +80,35 @@ describe('payable minutes are always floored, never rounded', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The eight-hour break
+// The four-hour DAILY break
 // ---------------------------------------------------------------------------
 
-describe('the unpaid break applies only past eight hours', () => {
+describe('the unpaid break applies only past four hours', () => {
   const at = (minutes: number) => calculateRoundedWorkTime(minutes);
 
-  it('takes nothing from a day of exactly eight hours', () => {
-    // Strictly greater than. 480 exactly keeps every minute.
-    const result = at(480);
+  it('takes nothing from a day of exactly four hours', () => {
+    // Strictly greater than. 240 exactly keeps every minute.
+    const result = at(240);
     expect(result.breakDeductionMinutes).toBe(0);
-    expect(result.minutesBeforeRounding).toBe(480);
-    expect(result.payableMinutes).toBe(480);
+    expect(result.minutesBeforeRounding).toBe(240);
+    expect(result.payableMinutes).toBe(240);
   });
 
   it('takes the full hour from a day one minute longer', () => {
-    const result = at(481);
+    const result = at(241);
     expect(result.breakDeductionMinutes).toBe(60);
-    expect(result.minutesBeforeRounding).toBe(421);
-    expect(result.payableMinutes).toBe(420);
+    expect(result.minutesBeforeRounding).toBe(181);
+    expect(result.payableMinutes).toBe(180);
   });
 
   it.each([
-    [480, 0, 480, 480],
-    [481, 60, 421, 420],
-    [490, 60, 430, 420],
-    [524, 60, 464, 450],
-    [525, 60, 465, 465],
-    [542, 60, 482, 480],
-    [600, 60, 540, 540],
+    [240, 0, 240, 240],
+    [241, 60, 181, 180],
+    [250, 60, 190, 180],
+    [284, 60, 224, 210],
+    [285, 60, 225, 225],
+    [302, 60, 242, 240],
+    [360, 60, 300, 300],
   ])(
     'worked %d -> break %d, net %d, payable %d',
     (worked, brk, net, payable) => {
@@ -120,7 +120,7 @@ describe('the unpaid break applies only past eight hours', () => {
   );
 
   it('takes nothing from a short day', () => {
-    for (const minutes of [0, 60, 300, 479]) {
+    for (const minutes of [0, 60, 180, 240]) {
       expect(at(minutes).breakDeductionMinutes).toBe(0);
     }
   });
@@ -180,7 +180,7 @@ describe('the policy is configurable and defaults to the company rule', () => {
     expect(workTimePolicy(settings())).toEqual(DEFAULT_WORK_TIME_POLICY);
     expect(DEFAULT_WORK_TIME_POLICY).toEqual({
       roundingMinutes: 15,
-      breakThresholdMinutes: 480,
+      breakThresholdMinutes: 240,
       breakDeductionMinutes: 60,
     });
   });
@@ -190,7 +190,7 @@ describe('the policy is configurable and defaults to the company rule', () => {
       settings({
         TIME_ROUNDING_MINUTES: '30',
         DAILY_BREAK_THRESHOLD_MINUTES: '360',
-        DAILY_BREAK_DEDUCTION_MINUTES: '45',
+        DAILY_REQUIRED_BREAK_MINUTES: '45',
       })
     );
     expect(policy).toEqual({
@@ -213,7 +213,7 @@ describe('the policy is configurable and defaults to the company rule', () => {
   });
 
   it('allows the break to be switched off explicitly', () => {
-    const policy = workTimePolicy(settings({ DAILY_BREAK_DEDUCTION_MINUTES: '0' }));
+    const policy = workTimePolicy(settings({ DAILY_REQUIRED_BREAK_MINUTES: '0' }));
     expect(calculateRoundedWorkTime(600, policy).breakDeductionMinutes).toBe(0);
     expect(calculateRoundedWorkTime(600, policy).payableMinutes).toBe(600);
   });
@@ -222,8 +222,8 @@ describe('the policy is configurable and defaults to the company rule', () => {
     // The old attendance-level flag is withdrawn; the payroll helper owns it.
     const defaults = DEFAULT_SETTINGS_MAP;
     expect(defaults.DAILY_DEDUCT_BREAK).toBe('false');
-    expect(defaults.DAILY_BREAK_THRESHOLD_MINUTES).toBe('480');
-    expect(defaults.DAILY_BREAK_DEDUCTION_MINUTES).toBe('60');
+    expect(defaults.DAILY_BREAK_THRESHOLD_MINUTES).toBe('240');
+    expect(defaults.DAILY_REQUIRED_BREAK_MINUTES).toBe('60');
     expect(defaults.TIME_ROUNDING_MINUTES).toBe('15');
   });
 });
@@ -258,7 +258,7 @@ const day = (workedMinutes: number) => ({
 
 describe('DAILY pay is priced from payable minutes', () => {
   it.each([
-    [480, '600.00'],
+    [480, '525.00'],
     [481, '525.00'],
     [524, '562.50'],
     [600, '675.00'],
@@ -287,8 +287,8 @@ describe('DAILY pay is priced from payable minutes', () => {
   it('totals worked and payable minutes as distinct figures', () => {
     const summary = computeDailyEarnings([day(524), day(480)], [profile('75')]);
     expect(summary.totalWorkedMinutes).toBe(1004);
-    expect(summary.totalBreakDeductionMinutes).toBe(60);
-    expect(summary.totalPayableMinutes).toBe(930);
+    expect(summary.totalBreakDeductionMinutes).toBe(120);
+    expect(summary.totalPayableMinutes).toBe(870);
   });
 
   it('is exact on Decimal rather than drifting on floats', () => {
@@ -416,10 +416,10 @@ describe('the rules live in exactly one module', () => {
 
   it('is called by every DAILY money path', () => {
     expect(read('src/services/daily-earnings.service.ts')).toContain(
-      'calculateRoundedWorkTime'
+      'calculateDailyPayableTime'
     );
     expect(read('src/services/attendance-valuation.service.ts')).toContain(
-      'calculateRoundedWorkTime'
+      'calculateDailyPayableTime'
     );
     // Lateness, early leave and OT are floored on the same interval by the
     // payroll aggregation, so no caller invents a second rounding rule.
@@ -557,10 +557,9 @@ describe('money is summed precisely and rounded once', () => {
   });
 
   it('reproduces the 41h29 / 93.75 example exactly', () => {
-    // Six days totalling 41h29m actual, two of them past eight hours so two
+    // Six days totalling 41h29m actual. Every day exceeds four hours, so six
     // hours of break come out, and 59 minutes are floored away - leaving
-    // 38h30m payable. 38.5 x 93.75 = 3,609.375 precisely, which rounds to
-    // 3,609.38 and must not become 3,609.39 by summing rounded days.
+    // 34h30m payable. 34.5 x 93.75 = 3,234.375 precisely.
     const days = [
       shift('2026-08-10', 628), // break 60 -> 568 -> 555, 13 away
       shift('2026-08-11', 568), // break 60 -> 508 -> 495, 13 away
@@ -572,11 +571,11 @@ describe('money is summed precisely and rounded once', () => {
     const summary = computeDailyEarnings(days, [rate('93.75')], DEFAULT_WORK_TIME_POLICY);
 
     expect(summary.totalWorkedMinutes).toBe(2489); // 41h29m
-    expect(summary.totalBreakDeductionMinutes).toBe(120); // two long days
+    expect(summary.totalBreakDeductionMinutes).toBe(360); // six qualifying days
     expect(summary.totalRoundedAwayMinutes).toBe(59);
-    expect(summary.totalPayableMinutes).toBe(2310); // 38h30m
-    expect(summary.preciseTotal.toString()).toBe('3609.375');
-    expect(summary.totalAmount.toFixed(2)).toBe('3609.38');
+    expect(summary.totalPayableMinutes).toBe(2070); // 34h30m
+    expect(summary.preciseTotal.toString()).toBe('3234.375');
+    expect(summary.totalAmount.toFixed(2)).toBe('3234.38');
   });
 
   it('does not drift by summing already-rounded daily amounts', () => {
@@ -590,6 +589,6 @@ describe('money is summed precisely and rounded once', () => {
   });
 
   it('rounds the aggregate half-up, not away from it', () => {
-    expect(new Prisma.Decimal('3609.375').toFixed(2)).not.toBe('3609.39');
+    expect(new Prisma.Decimal('3234.375').toFixed(2)).not.toBe('3234.39');
   });
 });

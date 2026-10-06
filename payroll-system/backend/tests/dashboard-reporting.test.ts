@@ -9,6 +9,8 @@ const row = (overrides: Partial<DetailedPayrollReportRow> = {}): DetailedPayroll
   department: 'บัญชี', position: 'เจ้าหน้าที่', employment_type: 'MONTHLY', calculation_status: 'CALCULATED',
   pay_basis: 'ฐานเงินเดือนรายเดือน', pay_rate: '30000.00', working_days: 22, present_days: 20,
   worked_hours: '160.00', actual_worked_minutes: 9600, break_deduction_minutes: 0,
+  session_gap_minutes: 0, required_break_minutes: 0, credited_break_minutes: 0,
+  additional_break_deduction_minutes: 0,
   rounded_away_minutes: 0, payable_minutes: 0, payable_hours: '0.00',
   actual_late_minutes: 5, rounded_late_minutes: 0,
   actual_early_leave_minutes: 0, rounded_early_leave_minutes: 0,

@@ -89,12 +89,12 @@ export default function AutoSyncStatus({ canSync = false }: { canSync?: boolean 
                 <div key={key} className="border-b border-border py-1.5 last:border-0">
                   <div className="flex justify-between gap-4">
                     <span>{label}</span>
-                    <span className={source.status === 'FAILED' ? 'text-danger' : source.status === 'SUCCESS' ? 'text-success' : ''}>
-                      {source.status === 'FAILED' ? 'ไม่สำเร็จ' : source.status === 'SUCCESS' ? 'สำเร็จ' : source.status}
+                    <span className={source.status === 'FAILED' ? 'text-danger' : source.status === 'PARTIAL' ? 'text-warning' : source.status === 'SUCCESS' ? 'text-success' : ''}>
+                      {source.status === 'FAILED' ? 'ไม่สำเร็จ' : source.status === 'PARTIAL' ? 'สำเร็จบางส่วน' : source.status === 'SUCCESS' ? 'สำเร็จ' : source.status}
                     </span>
                   </div>
-                  {source.status === 'FAILED' && source.lastErrorSummary && (
-                    <p className="mt-1 break-words text-[11px] text-danger">{source.lastErrorSummary}</p>
+                  {(source.status === 'FAILED' || source.status === 'PARTIAL') && source.lastErrorSummary && (
+                    <p className={`mt-1 break-words text-[11px] ${source.status === 'FAILED' ? 'text-danger' : 'text-warning'}`}>{source.lastErrorSummary}</p>
                   )}
                 </div>
               );

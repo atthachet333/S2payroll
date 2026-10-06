@@ -119,7 +119,10 @@ export function PayslipSheet({ snapshot }: { snapshot: PayslipSnapshot }) {
         </div>
 
         {/* How this person is paid, in their own terms */}
-        <div className="payslip-basis mt-3 grid grid-cols-3 gap-2 rounded border border-slate-300 bg-[#eef2ff] px-3 py-2.5 print-border">
+        <div className={cn(
+          'payslip-basis mt-3 grid gap-2 rounded border border-slate-300 bg-[#eef2ff] px-3 py-2.5 print-border',
+          pay.kind === 'HOURLY' && employee.employmentType === 'DAILY' ? 'grid-cols-4' : 'grid-cols-3'
+        )}>
           {pay.kind === 'HOURLY' ? (
             <>
               <Basis
@@ -129,10 +132,13 @@ export function PayslipSheet({ snapshot }: { snapshot: PayslipSnapshot }) {
                 }
               />
               {/* Actual and paid hours are shown as two figures, never one. A
-                  day past eight hours loses an unpaid break and the remainder
+                  DAILY work past four hours receives session-gap break credit and the remainder
                   is floored, so presenting paid hours as the hours worked
                   would misstate what the employee actually did. */}
               <Basis label="ชั่วโมงทำงานจริง" value={formatDuration(pay.workedMinutes)} />
+              {employee.employmentType === 'DAILY' && (
+                <Basis label="ชั่วโมงพักที่หัก" value={formatDuration(breakMinutes)} />
+              )}
               {payableMinutes !== null ? (
                 <Basis label="ชั่วโมงคิดค่าจ้าง" value={formatDuration(payableMinutes)} />
               ) : (
@@ -177,7 +183,7 @@ export function PayslipSheet({ snapshot }: { snapshot: PayslipSnapshot }) {
           <Metric label="ขาดงาน" value={`${formatNumber(attendance.absentDays)} วัน`} />
           <Metric label="ลา" value={`${formatNumber(attendance.leaveDays, 1)} วัน`} />
           {breakMinutes > 0 && (
-            <Metric label="หักเวลาพัก" value={formatDuration(breakMinutes)} />
+            <Metric label="พักที่ระบบหักเพิ่ม" value={formatDuration(breakMinutes)} />
           )}
         </div>
 
@@ -199,6 +205,24 @@ export function PayslipSheet({ snapshot }: { snapshot: PayslipSnapshot }) {
           />
         </div>
 
+        {Number(totals.roundingAdjustment ?? 0) !== 0 && (
+          <div className="mt-3 divide-y divide-slate-200 rounded border border-slate-300 px-4 text-xs print-border">
+            <div className="flex justify-between py-2">
+              <span className="text-slate-600">ยอดสุทธิก่อนปัด</span>
+              <span className="font-medium tabular-nums">
+                {formatMoney(totals.netPayBeforeRounding ?? totals.netSalary)} บาท
+              </span>
+            </div>
+            <div className="flex justify-between py-2">
+              <span className="text-slate-600">ปรับเศษ</span>
+              <span className="font-medium tabular-nums">
+                {Number(totals.roundingAdjustment) > 0 ? '+' : ''}
+                {formatMoney(totals.roundingAdjustment)} บาท
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Net pay - the one figure the reader is looking for */}
         <div className="payslip-net-band mt-4 flex items-center justify-between rounded bg-[#1e3a8a] px-5 py-4 text-white print-navy">
           <div>
@@ -206,7 +230,7 @@ export function PayslipSheet({ snapshot }: { snapshot: PayslipSnapshot }) {
             <p className="text-sm font-bold">เงินเดือนสุทธิที่ได้รับ</p>
           </div>
           <span className="payslip-net text-2xl font-bold tabular-nums">
-            {formatMoney(totals.netSalary)} บาท
+            {formatMoney(totals.payableNet ?? totals.netSalary, 0)} บาท
           </span>
         </div>
 

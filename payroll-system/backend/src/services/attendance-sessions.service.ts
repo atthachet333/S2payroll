@@ -3,6 +3,7 @@ import { prisma } from '../plugins/prisma.js';
 import { formatDateOnly, parseSheetTime } from '../utils/datetime.js';
 import {
   resolveEventAttendance,
+  sourceEventInstant,
   sourceEventHash,
   type AttendanceSourceEvent,
 } from './event-attendance.service.js';
@@ -111,8 +112,12 @@ export async function attachAttendanceSessions<T extends AttendanceLike>(items: 
       const inRaw = session.checkIn ? rawByHash.get(sourceEventHash(session.checkIn)) : undefined;
       const outRaw = session.checkOut ? rawByHash.get(sourceEventHash(session.checkOut)) : undefined;
       return {
-        checkIn: session.checkIn ? parseSheetTime(item.workDate, session.checkIn.time) : null,
-        checkOut: session.checkOut ? parseSheetTime(item.workDate, session.checkOut.time) : null,
+        checkIn: session.checkIn
+          ? sourceEventInstant(session.checkIn) ?? parseSheetTime(item.workDate, session.checkIn.time)
+          : null,
+        checkOut: session.checkOut
+          ? sourceEventInstant(session.checkOut) ?? parseSheetTime(item.workDate, session.checkOut.time)
+          : null,
         workedMinutes: session.durationMinutes,
         checkInRawId: inRaw?.id ?? null,
         checkOutRawId: outRaw?.id ?? null,

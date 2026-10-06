@@ -343,6 +343,11 @@ export default function AttendancePage() {
                           <td className="whitespace-nowrap">
                             <div className="flex items-center gap-1.5">
                               <AttendanceStatusBadge status={record.status} />
+                              {record.status === 'LEAVE' && record.leaveType && (
+                                <span className="text-xs text-muted-foreground">
+                                  {LEAVE_TYPE_LABELS[record.leaveType] ?? record.leaveType}
+                                </span>
+                              )}
                               {record.isCorrected && (
                                 <Badge variant="outline" title="แก้ไขด้วยมือ">
                                   แก้ไขแล้ว

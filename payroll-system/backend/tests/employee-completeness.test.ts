@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { EmploymentType } from '@prisma/client';
+import { EmploymentType, PayType, Prisma } from '@prisma/client';
 import {
   ALWAYS_REQUIRED_FIELDS,
   COMPENSATION_FIELD_BY_TYPE,
@@ -26,6 +26,22 @@ import {
 const FRONTEND = path.resolve(__dirname, '../../frontend');
 const readFe = (p: string) => fs.readFileSync(path.join(FRONTEND, p), 'utf8');
 
+const payProfile = (
+  payType: PayType,
+  amount: string,
+  effectiveFrom = '2026-01-01',
+  effectiveTo: string | null = null,
+  isActive = true
+) => ({
+  id: `${payType}-${effectiveFrom}`,
+  payType,
+  monthlySalary: payType === PayType.MONTHLY ? new Prisma.Decimal(amount) : null,
+  hourlyRate: payType === PayType.HOURLY ? new Prisma.Decimal(amount) : null,
+  effectiveFrom: new Date(`${effectiveFrom}T00:00:00.000Z`),
+  effectiveTo: effectiveTo ? new Date(`${effectiveTo}T00:00:00.000Z`) : null,
+  isActive,
+});
+
 /** A fully-populated MONTHLY employee. Individual cases knock one field out. */
 const complete = (over: Partial<CompletenessInput> = {}): CompletenessInput => ({
   employeeCode: 'S2A010',
@@ -37,6 +53,7 @@ const complete = (over: Partial<CompletenessInput> = {}): CompletenessInput => (
   startDate: new Date('2026-01-01T00:00:00.000Z'),
   status: 'ACTIVE',
   baseSalary: 18000,
+  payProfiles: [payProfile(PayType.MONTHLY, '18000')],
   attendanceRequired: true,
   leaveTrackingRequired: true,
   ...over,
@@ -85,7 +102,7 @@ describe('each required field is genuinely required', () => {
 
   it('reports several missing fields at once with an accurate count', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ departmentId: null, positionId: null, baseSalary: 0 })
+      complete({ departmentId: null, positionId: null, payProfiles: [] })
     );
     expect(result.missingCount).toBe(3);
     expect(result.missingLabels).toEqual(['แผนก', 'ตำแหน่ง', 'เงินเดือนพื้นฐาน']);
@@ -94,7 +111,7 @@ describe('each required field is genuinely required', () => {
 
 describe('compensation requirement follows the pay type', () => {
   it('MONTHLY needs a monthly salary above zero', () => {
-    const result = evaluateEmployeeProfileCompleteness(complete({ baseSalary: 0 }));
+    const result = evaluateEmployeeProfileCompleteness(complete({ payProfiles: [] }));
     expect(result.complete).toBe(false);
     expect(result.missingFields).toContain('monthlySalary');
     expect(result.missingLabels).toContain('เงินเดือนพื้นฐาน');
@@ -102,63 +119,60 @@ describe('compensation requirement follows the pay type', () => {
 
   it('CONTRACT follows MONTHLY - it is a fixed monthly figure', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ employmentType: EmploymentType.CONTRACT, baseSalary: 0 })
+      complete({ employmentType: EmploymentType.CONTRACT, payProfiles: [] })
     );
     expect(result.complete).toBe(false);
     expect(result.missingFields).toContain('monthlySalary');
   });
 
-  // A daily or hourly rate is payroll configuration settled later, not part of
-  // the employee's master data. Payroll readiness still requires it separately.
-  it('DAILY with no rate is COMPLETE - the rate is not master data', () => {
+  it('DAILY with no hourly rate is incomplete', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ employmentType: EmploymentType.DAILY, baseSalary: 0 })
+      complete({ employmentType: EmploymentType.DAILY, payProfiles: [] })
     );
-    expect(result.complete).toBe(true);
-    expect(result.missingCount).toBe(0);
-    expect(result.compensationRequired).toBe(false);
+    expect(result.complete).toBe(false);
+    expect(result.missingFields).toContain('hourlyRate');
+    expect(result.compensationRequired).toBe(true);
   });
 
-  it('DAILY never lists a compensation field as missing', () => {
+  it('DAILY requires hourlyRate, never monthlySalary', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ employmentType: EmploymentType.DAILY, baseSalary: 0 })
+      complete({ employmentType: EmploymentType.DAILY, payProfiles: [] })
     );
-    expect(result.missingFields).not.toContain('dailyRate');
-    expect(result.missingLabels).not.toContain('อัตราค่าจ้างรายวัน');
-    expect(result.missingLabels).toEqual([]);
+    expect(result.missingFields).toEqual(['hourlyRate']);
+    expect(result.missingFields).not.toContain('monthlySalary');
   });
 
-  it('HOURLY with no rate is COMPLETE, consistent with DAILY', () => {
+  it('HOURLY with no rate is incomplete, consistent with DAILY', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ employmentType: EmploymentType.HOURLY, baseSalary: 0 })
+      complete({ employmentType: EmploymentType.HOURLY, payProfiles: [] })
     );
-    expect(result.complete).toBe(true);
-    expect(result.missingFields).not.toContain('hourlyRate');
-    expect(result.compensationRequired).toBe(false);
+    expect(result.complete).toBe(false);
+    expect(result.missingFields).toContain('hourlyRate');
+    expect(result.compensationRequired).toBe(true);
   });
 
   it('a DAILY employee still fails on genuinely missing master data', () => {
     const result = evaluateEmployeeProfileCompleteness(
-      complete({ employmentType: EmploymentType.DAILY, baseSalary: 0, positionId: null })
+      complete({ employmentType: EmploymentType.DAILY, payProfiles: [payProfile(PayType.HOURLY, '75')], positionId: null })
     );
     expect(result.complete).toBe(false);
     expect(result.missingLabels).toEqual(['ตำแหน่ง']);
   });
 
-  it('only the salaried pay types require compensation', () => {
-    expect([...COMPENSATION_REQUIRED_TYPES].sort()).toEqual(['CONTRACT', 'MONTHLY']);
+  it('all non-exempt pay types require their matching compensation', () => {
+    expect([...COMPENSATION_REQUIRED_TYPES].sort()).toEqual(['CONTRACT', 'DAILY', 'HOURLY', 'MONTHLY']);
   });
 
   it('a configured DAILY rate satisfies the requirement', () => {
     expect(
       evaluateEmployeeProfileCompleteness(
-        complete({ employmentType: EmploymentType.DAILY, baseSalary: 600 })
+        complete({ employmentType: EmploymentType.DAILY, payProfiles: [payProfile(PayType.HOURLY, '75')] })
       ).complete
     ).toBe(true);
   });
 
   it('rejects a negative amount as well as zero', () => {
-    expect(evaluateEmployeeProfileCompleteness(complete({ baseSalary: -1 })).complete).toBe(false);
+    expect(evaluateEmployeeProfileCompleteness(complete({ payProfiles: [payProfile(PayType.MONTHLY, '-1')] })).complete).toBe(false);
   });
 
   it('maps every employment type to a compensation field', () => {
@@ -190,13 +204,13 @@ describe('deliberate exclusions', () => {
 
   it('needs BOTH exemptions - one alone still requires compensation', () => {
     const attendanceOnly = evaluateEmployeeProfileCompleteness(
-      complete({ baseSalary: 0, attendanceRequired: false, leaveTrackingRequired: true })
+      complete({ payProfiles: [], attendanceRequired: false, leaveTrackingRequired: true })
     );
     expect(attendanceOnly.exempt).toBe(false);
     expect(attendanceOnly.complete).toBe(false);
 
     const leaveOnly = evaluateEmployeeProfileCompleteness(
-      complete({ baseSalary: 0, attendanceRequired: true, leaveTrackingRequired: false })
+      complete({ payProfiles: [], attendanceRequired: true, leaveTrackingRequired: false })
     );
     expect(leaveOnly.exempt).toBe(false);
     expect(leaveOnly.complete).toBe(false);
@@ -251,33 +265,36 @@ describe('labels are operator-facing, never column names', () => {
 });
 
 describe('the database filter agrees with the evaluator', () => {
-  const incompleteClauses = () => (completenessWhere('INCOMPLETE') as { OR: object[] }).OR;
+  const filterDate = new Date('2026-10-06T00:00:00.000Z');
+  const incompleteClauses = () => (completenessWhere('INCOMPLETE', filterDate) as { OR: object[] }).OR;
 
   it('INCOMPLETE matches on any missing required field', () => {
     const serialised = JSON.stringify(incompleteClauses());
     expect(serialised).toContain('departmentId');
     expect(serialised).toContain('positionId');
-    expect(serialised).toContain('baseSalary');
+    expect(serialised).toContain('payProfiles');
+    expect(serialised).toContain('monthlySalary');
+    expect(serialised).toContain('hourlyRate');
   });
 
   it('COMPLETE is the exact negation of INCOMPLETE', () => {
-    const complete = completenessWhere('COMPLETE') as { NOT: { OR: object[] } };
+    const complete = completenessWhere('COMPLETE', filterDate) as { NOT: { OR: object[] } };
     expect(complete.NOT.OR).toEqual(incompleteClauses());
   });
 
-  it('treats a zero or negative salary as incomplete, matching the evaluator', () => {
-    expect(JSON.stringify(incompleteClauses())).toContain('"lte":0');
-    expect(evaluateEmployeeProfileCompleteness(complete({ baseSalary: 0 })).complete).toBe(false);
+  it('requires a positive matching effective profile, matching the evaluator', () => {
+    expect(JSON.stringify(incompleteClauses())).toContain('"gt":0');
+    expect(evaluateEmployeeProfileCompleteness(complete({ payProfiles: [] })).complete).toBe(false);
   });
 });
 
 describe('the API decorates rows without mutating them', () => {
   it('attaches profileCompleteness and leaves the original fields intact', () => {
-    const row = complete({ baseSalary: 0 });
+    const row = complete({ payProfiles: [] });
     const decorated = withProfileCompleteness(row);
     expect(decorated.profileCompleteness.complete).toBe(false);
     expect(decorated.employeeCode).toBe('S2A010');
-    expect(decorated.baseSalary).toBe(0);
+    expect(decorated.baseSalary).toBe(18000);
   });
 
   it('is exposed by both the list and the detail service', () => {
@@ -285,8 +302,7 @@ describe('the API decorates rows without mutating them', () => {
       path.resolve(__dirname, '../src/services/employee.service.ts'),
       'utf8'
     );
-    expect(service).toContain('items: items.map(withProfileCompleteness)');
-    expect(service).toContain('return withProfileCompleteness(employee)');
+    expect(service).toContain('withProfileCompleteness(employee, effectiveDate)');
   });
 
   it('applies the completeness filter in the query, alongside the others', () => {
@@ -294,7 +310,7 @@ describe('the API decorates rows without mutating them', () => {
       path.resolve(__dirname, '../src/services/employee.service.ts'),
       'utf8'
     );
-    expect(service).toContain('...(params.completeness ? completenessWhere(params.completeness) : {})');
+    expect(service).toContain('completenessWhere(params.completeness, effectiveDate)');
     // The other filters must still be present in the same where clause.
     expect(service).toContain('params.departmentId');
     expect(service).toContain('params.employmentType');
@@ -402,7 +418,8 @@ describe('the detail drawer is strictly read-only', () => {
 // ---------------------------------------------------------------------------
 
 describe('the completeness filter treats an exempt executive as complete', () => {
-  const incompleteClauses = () => JSON.stringify((completenessWhere('INCOMPLETE') as { OR: object[] }).OR);
+  const filterDate = new Date('2026-10-06T00:00:00.000Z');
+  const incompleteClauses = () => JSON.stringify((completenessWhere('INCOMPLETE', filterDate) as { OR: object[] }).OR);
 
   it('only counts a zero salary against employees it is required of', () => {
     // The salary clause must be conditioned on NOT being doubly exempt.
@@ -410,13 +427,13 @@ describe('the completeness filter treats an exempt executive as complete', () =>
     expect(incompleteClauses()).toContain('leaveTrackingRequired');
   });
 
-  it('still counts a zero salary against a normal employee', () => {
-    expect(incompleteClauses()).toContain('"baseSalary":{"lte":0}');
-    expect(evaluateEmployeeProfileCompleteness(complete({ baseSalary: 0 })).complete).toBe(false);
+  it('still counts a missing effective profile against a normal employee', () => {
+    expect(incompleteClauses()).toContain('payProfiles');
+    expect(evaluateEmployeeProfileCompleteness(complete({ payProfiles: [] })).complete).toBe(false);
   });
 
   it('COMPLETE remains the exact negation of INCOMPLETE', () => {
-    const c = completenessWhere('COMPLETE') as { NOT: { OR: object[] } };
+    const c = completenessWhere('COMPLETE', filterDate) as { NOT: { OR: object[] } };
     expect(JSON.stringify(c.NOT.OR)).toBe(incompleteClauses());
   });
 });
@@ -543,18 +560,18 @@ describe('the Employees table shows the executive marker', () => {
 // Profile completeness is not payroll readiness
 // ---------------------------------------------------------------------------
 
-describe('profile completeness and payroll readiness stay separate', () => {
+describe('profile completeness and payroll readiness share canonical pay-profile matching', () => {
   const preCheck = fs.readFileSync(
     path.resolve(__dirname, '../src/services/pre-payroll-check.service.ts'),
     'utf8'
   );
 
-  it('a DAILY employee with no rate is profile-complete', () => {
+  it('a DAILY employee with no rate is profile-incomplete', () => {
     expect(
       evaluateEmployeeProfileCompleteness(
-        complete({ employmentType: EmploymentType.DAILY, baseSalary: 0 })
+        complete({ employmentType: EmploymentType.DAILY, payProfiles: [] })
       ).complete
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('...and payroll reports the missing DAILY rate as a warning, not a blocker', () => {
@@ -563,8 +580,7 @@ describe('profile completeness and payroll readiness stay separate', () => {
     const dailyWarning = preCheck.slice(preCheck.indexOf("code: 'DAILY_RATE_UNCONFIGURED'"));
     expect(dailyWarning).toContain("severity: 'WARNING'");
     expect(preCheck).toContain('validProfile(p, e.employmentType)');
-    expect(preCheck).toContain("profile.payType === 'HOURLY'");
-    expect(preCheck).toContain('profile.hourlyRate');
+    expect(preCheck).toContain('isUsablePayProfile(profile, employmentType)');
   });
 
   it('the HOURLY pre-payroll rate check remains BLOCKING', () => {
@@ -597,16 +613,15 @@ describe('the SQL filter matches the new rule', () => {
     expect(incomplete()).toContain('"employmentType":{"in":["MONTHLY","CONTRACT"]}');
   });
 
-  it('agrees with the evaluator for each pay type at salary 0', () => {
-    // MONTHLY incomplete, DAILY/HOURLY complete - the clause above encodes
-    // exactly that, and the evaluator must say the same.
-    expect(evaluateEmployeeProfileCompleteness(complete({ baseSalary: 0 })).complete).toBe(false);
-    for (const type of [EmploymentType.DAILY, EmploymentType.HOURLY]) {
-      expect(
-        evaluateEmployeeProfileCompleteness(complete({ employmentType: type, baseSalary: 0 })).complete,
-        type
-      ).toBe(true);
-    }
+  it('requires the matching profile family for both monthly and hourly types', () => {
+    const where = incomplete();
+    expect(where).toContain('"payType":"MONTHLY"');
+    expect(where).toContain('"payType":"HOURLY"');
+    expect(evaluateEmployeeProfileCompleteness(complete({ payProfiles: [] })).complete).toBe(false);
+    expect(evaluateEmployeeProfileCompleteness(complete({
+      employmentType: EmploymentType.DAILY,
+      payProfiles: [payProfile(PayType.HOURLY, '75')],
+    })).complete).toBe(true);
   });
 
   it('still excludes an exempt executive from the salary clause', () => {
@@ -615,20 +630,14 @@ describe('the SQL filter matches the new rule', () => {
   });
 });
 
-describe('the detail view presents an unset rate neutrally', () => {
+describe('the detail view uses canonical compensation', () => {
   const drawer = readFe('src/features/employees/EmployeeDetailDrawer.tsx');
 
-  it('branches on compensationRequired before showing the red wording', () => {
-    expect(drawer).toContain('!completeness?.compensationRequired');
-    expect(drawer).toMatch(/compensationRequired[\s\S]*ข้อมูลค่าจ้างจะกำหนดในขั้นตอน Payroll[\s\S]*text-rose-600/);
+  it('renders the backend-resolved effective profile', () => {
+    expect(drawer).toContain('detail.effectivePayProfile');
   });
 
-  it('explains that the rate does not affect profile completeness', () => {
-    expect(drawer).toContain('ไม่มีผลกับความครบถ้วนของข้อมูลพนักงาน');
-    expect(drawer).toContain('ข้อมูลค่าจ้างจะกำหนดในขั้นตอน Payroll');
-  });
-
-  it('renders that state in slate, not rose', () => {
-    expect(drawer).toMatch(/ยังไม่ได้กำหนด[\s\S]{0,200}text-muted-foreground/);
+  it('does not fall back to legacy baseSalary for the current rate', () => {
+    expect(drawer).not.toContain('Number(detail.baseSalary)');
   });
 });

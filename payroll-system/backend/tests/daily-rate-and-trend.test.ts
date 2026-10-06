@@ -159,8 +159,8 @@ describe('payroll prices a typed rate exactly', () => {
   it('prices an off-preset rate the same way as a preset one', () => {
     const preset = computeDailyEarnings([day('2026-08-03', 480)], [profile('75')]);
     const typed = computeDailyEarnings([day('2026-08-03', 480)], [profile('62')]);
-    expect(preset.totalAmount.toFixed(2)).toBe('600.00');
-    expect(typed.totalAmount.toFixed(2)).toBe('496.00');
+    expect(preset.totalAmount.toFixed(2)).toBe('525.00');
+    expect(typed.totalAmount.toFixed(2)).toBe('434.00');
   });
 });
 

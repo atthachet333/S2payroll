@@ -87,7 +87,15 @@ export interface PayslipSnapshot {
   };
   incomes: PayslipLine[];
   deductions: PayslipLine[];
-  totals: { grossIncome: string; totalDeduction: string; netSalary: string };
+  totals: {
+    grossIncome: string;
+    totalDeduction: string;
+    netPayBeforeRounding?: string;
+    roundingAdjustment?: string;
+    payableNet?: string;
+    /** Backward-compatible alias for payableNet. */
+    netSalary: string;
+  };
 }
 
 const fmtQty = (value: Prisma.Decimal | null): string | null =>
@@ -174,6 +182,9 @@ async function buildSnapshot(payrollEmployeeId: string): Promise<{
     totals: {
       grossIncome: money(row.grossIncome).toFixed(2),
       totalDeduction: money(row.totalDeduction).toFixed(2),
+      netPayBeforeRounding: money(row.netSalaryBeforeRounding ?? row.netSalary).toFixed(2),
+      roundingAdjustment: money(row.roundingAdjustment ?? 0).toFixed(2),
+      payableNet: money(row.netSalary).toFixed(2),
       netSalary: money(row.netSalary).toFixed(2),
     },
   };

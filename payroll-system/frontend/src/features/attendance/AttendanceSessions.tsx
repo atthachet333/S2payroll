@@ -47,7 +47,8 @@ export default function AttendanceSessions({ record }: { record: AttendanceRecor
               {record.attendanceIssues?.map((issue) => <p key={issue} className="mt-2 text-danger">ต้องตรวจสอบ: {issue}</p>)}
               {!record.hasOpenSession && record.dailyPay && record.dailyPay.status === 'CALCULATED' && (
                 <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                  <p>หักพัก {formatMinutes(record.dailyPay.breakDeductionMinutes)}</p>
+                  <p>พักจริง {formatMinutes(record.dailyPay.sessionGapMinutes)}</p>
+                  <p>ระบบหักเพิ่ม {formatMinutes(record.dailyPay.additionalBreakDeductionMinutes)}</p>
                   <p>ปัดออก {formatMinutes(record.dailyPay.roundedAwayMinutes)}</p>
                   <p>เวลาคิดเงิน {formatMinutes(record.dailyPay.payableMinutes)}</p>
                 </div>

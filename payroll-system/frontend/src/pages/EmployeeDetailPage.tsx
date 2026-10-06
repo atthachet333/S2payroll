@@ -1,5 +1,4 @@
 import * as React from 'react';
-import dayjs from 'dayjs';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Pencil } from 'lucide-react';
@@ -43,6 +42,15 @@ import { EmployeeStatusBadge, EMPLOYMENT_TYPE_LABELS } from '@/components/Status
 import { formatDate, formatDateWithWeekday, formatMinutes, formatMoney, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
 import { AttendanceStatusBadge } from '@/components/StatusBadge';
 import type { DailyEarnings } from '@/types';
+
+const LEAVE_TYPE_LABELS: Record<string, string> = {
+  ANNUAL: 'ลาพักร้อน',
+  SICK: 'ลาป่วย',
+  PERSONAL: 'ลากิจ',
+  MATERNITY: 'ลาคลอด',
+  UNPAID: 'ลาไม่รับค่าจ้าง',
+  OTHER: 'ลาอื่น ๆ',
+};
 
 export default function EmployeeDetailPage() {
   const { id = '' } = useParams();
@@ -120,12 +128,7 @@ export default function EmployeeDetailPage() {
   }
 
   const { employee, attendance, payslips, payrollHistory } = query.data;
-  const currentPayProfile = payProfilesQuery.data?.find((profile) => {
-    const today = dayjs().startOf('day');
-    return profile.isActive && !today.isBefore(dayjs(profile.effectiveFrom), 'day') &&
-      (!profile.effectiveTo || !today.isAfter(dayjs(profile.effectiveTo), 'day'));
-  });
-  const paySource = currentPayProfile ? 'PAY_PROFILE' : Number(employee.baseSalary) > 0 ? 'LEGACY_BASE_SALARY' : 'UNCONFIGURED';
+  const currentPayProfile = employee.effectivePayProfile ?? null;
   const monthlyBases =
     currentPayProfile?.payType === 'MONTHLY' ? derivedBases(currentPayProfile.monthlySalary) : null;
   const dailyEarnings = dailyEarningsQuery.data;
@@ -191,8 +194,8 @@ export default function EmployeeDetailPage() {
                   label="ประเภทการจ้าง"
                   value={EMPLOYMENT_TYPE_LABELS[employee.employmentType]}
                 />
-                <InfoRow label="สถานะค่าจ้าง" value={paySource === 'PAY_PROFILE' ? 'พร้อมใช้งาน' : paySource === 'LEGACY_BASE_SALARY' ? 'ข้อมูลเดิม — รอกำหนดวันที่เริ่มใช้' : 'ยังไม่ได้กำหนด'} />
-                <InfoRow label={currentPayProfile?.payType === 'MONTHLY' || (!currentPayProfile && ['MONTHLY', 'CONTRACT'].includes(employee.employmentType)) ? 'เงินเดือนปัจจุบัน' : 'ค่าจ้างต่อชั่วโมงปัจจุบัน'} value={currentPayProfile ? `${formatMoney(currentPayProfile.payType === 'MONTHLY' ? currentPayProfile.monthlySalary : currentPayProfile.hourlyRate)} บาท${currentPayProfile.payType === 'MONTHLY' ? ' / เดือน' : ' / ชั่วโมง'}` : paySource === 'LEGACY_BASE_SALARY' ? `${formatMoney(employee.baseSalary)} บาท (ข้อมูลเดิม)` : '-'} />
+                <InfoRow label="สถานะค่าจ้าง" value={currentPayProfile ? 'พร้อมใช้งาน' : 'ยังไม่ได้กำหนด'} />
+                <InfoRow label={currentPayProfile?.payType === 'MONTHLY' || (!currentPayProfile && ['MONTHLY', 'CONTRACT'].includes(employee.employmentType)) ? 'เงินเดือนปัจจุบัน' : 'ค่าจ้างต่อชั่วโมงปัจจุบัน'} value={currentPayProfile ? `${formatMoney(currentPayProfile.payType === 'MONTHLY' ? currentPayProfile.monthlySalary : currentPayProfile.hourlyRate)} บาท${currentPayProfile.payType === 'MONTHLY' ? ' / เดือน' : ' / ชั่วโมง'}` : '-'} />
                 <InfoRow label="เริ่มใช้วันที่" value={currentPayProfile ? formatDate(currentPayProfile.effectiveFrom) : '-'} />
                 {/* Derived from the salary, not stored against it: the employee
                     is still paid monthly. These are the bases the deduction
@@ -413,7 +416,8 @@ export default function EmployeeDetailPage() {
                           <th>เข้า</th>
                           <th>ออก</th>
                           <th className="text-right">เวลาทำงานจริง</th>
-                          <th className="text-right">หักพัก</th>
+                          <th className="text-right">พักจริง</th>
+                          <th className="text-right">ระบบหักเพิ่ม</th>
                           <th className="text-right">ปัดเวลาออก</th>
                           <th className="text-right">เวลาที่ใช้คิด</th>
                           <th className="text-right">สาย</th>
@@ -432,8 +436,13 @@ export default function EmployeeDetailPage() {
                               {row.hasOpenSession && <span className="ml-1 text-info">+ กำลังทำงาน</span>}
                             </td>
                             <td className="num text-muted-foreground">
-                              {row.dailyPay && row.dailyPay.breakDeductionMinutes > 0
-                                ? formatMinutes(row.dailyPay.breakDeductionMinutes)
+                              {row.dailyPay && row.dailyPay.sessionGapMinutes > 0
+                                ? formatMinutes(row.dailyPay.sessionGapMinutes)
+                                : '-'}
+                            </td>
+                            <td className="num text-muted-foreground">
+                              {row.dailyPay && row.dailyPay.additionalBreakDeductionMinutes > 0
+                                ? formatMinutes(row.dailyPay.additionalBreakDeductionMinutes)
                                 : '-'}
                             </td>
                             <td className="num text-muted-foreground">
@@ -451,7 +460,14 @@ export default function EmployeeDetailPage() {
                                 ? '-'
                                 : `${row.lateMinutes} นาที`}
                             </td>
-                            <td><AttendanceStatusBadge status={row.status} /></td>
+                            <td>
+                              <AttendanceStatusBadge status={row.status} />
+                              {row.status === 'LEAVE' && row.leaveType && (
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                  {LEAVE_TYPE_LABELS[row.leaveType] ?? row.leaveType}
+                                </span>
+                              )}
+                            </td>
                             <td className="num"><DailyPayCell dailyPay={row.dailyPay} /></td>
                           </tr>
                         ))}
@@ -544,12 +560,16 @@ function DailyEarningsPanel({
       {/* The full trail, so the total can be accounted for without a
           calculator: what was worked, what the break and the rounding took,
           and what remained to be paid. */}
-      <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <MiniStat label="จำนวนวันที่มาทำงาน" value={`${formatNumber(summary.workedDays)} วัน`} />
         <MiniStat label="เวลาทำงานจริงรวม" value={formatMinutes(summary.totalWorkedMinutes)} />
         <MiniStat
-          label="เวลาพักที่หักรวม"
-          value={formatMinutes(summary.totalBreakDeductionMinutes)}
+          label="พักจากการออกงานจริงรวม"
+          value={formatMinutes(summary.totalSessionGapMinutes)}
+        />
+        <MiniStat
+          label="พักที่ระบบหักเพิ่มรวม"
+          value={formatMinutes(summary.totalAdditionalBreakDeductionMinutes)}
         />
         <MiniStat
           label="เวลาที่ถูกปัดออก"
@@ -582,7 +602,8 @@ function DailyEarningsPanel({
               <th>เข้า</th>
               <th>ออก</th>
               <th className="text-right">เวลาจริง</th>
-              <th className="text-right">หักพัก</th>
+              <th className="text-right">พักจากการออกงานจริง</th>
+              <th className="text-right">ระบบหักเพิ่ม</th>
               <th className="text-right">ปัดออก</th>
               <th className="text-right">เวลาคิดเงิน</th>
               <th className="text-right">อัตรา/ชม.</th>
@@ -597,17 +618,20 @@ function DailyEarningsPanel({
                 <td>{formatTime(row.checkOut)}</td>
                 <td className="num">{formatMinutes(row.workedMinutes)}</td>
                 <td className="num text-muted-foreground">
-                  {row.breakDeductionMinutes > 0 ? formatMinutes(row.breakDeductionMinutes) : '-'}
+                  {row.sessionGapMinutes > 0 ? formatMinutes(row.sessionGapMinutes) : '-'}
+                </td>
+                <td className="num text-muted-foreground">
+                  {row.additionalBreakDeductionMinutes > 0 ? formatMinutes(row.additionalBreakDeductionMinutes) : '-'}
                 </td>
                 <td className="num text-muted-foreground">
                   {row.roundedAwayMinutes > 0 ? `${formatNumber(row.roundedAwayMinutes)} น.` : '-'}
                 </td>
-                <td className="num font-medium">{formatMinutes(row.payableMinutes)}</td>
+                <td className="num font-medium">{row.finalized ? formatMinutes(row.payableMinutes) : 'กำลังคำนวณ'}</td>
                 <td className="num">
                   {row.rateConfigured ? `${formatMoney(row.hourlyRate)} บาท` : '-'}
                 </td>
                 <td className={`num font-medium ${row.rateConfigured ? '' : 'text-warning'}`}>
-                  {row.rateConfigured ? formatMoney(row.amount) : 'ยังไม่ได้กำหนดอัตรา'}
+                  {!row.finalized ? 'กำลังคำนวณ' : row.rateConfigured ? formatMoney(row.amount) : 'ยังไม่ได้กำหนดอัตรา'}
                 </td>
               </tr>
             ))}
@@ -616,7 +640,8 @@ function DailyEarningsPanel({
             <tr className="font-semibold">
               <td colSpan={3}>รวม {formatNumber(summary.workedDays)} วัน</td>
               <td className="num">{formatMinutes(summary.totalWorkedMinutes)}</td>
-              <td className="num">{formatMinutes(summary.totalBreakDeductionMinutes)}</td>
+              <td className="num">{formatMinutes(summary.totalSessionGapMinutes)}</td>
+              <td className="num">{formatMinutes(summary.totalAdditionalBreakDeductionMinutes)}</td>
               <td className="num">{formatNumber(summary.totalRoundedAwayMinutes)} น.</td>
               <td className="num">{formatMinutes(summary.totalPayableMinutes)}</td>
               <td />

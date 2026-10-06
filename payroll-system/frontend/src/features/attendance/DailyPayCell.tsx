@@ -55,7 +55,7 @@ export function DailyPayCell({ dailyPay }: { dailyPay: DailyPay | null | undefin
 
   const adjusted =
     Number(dailyPay.attendanceDeduction) > 0 ||
-    dailyPay.breakDeductionMinutes > 0 ||
+    dailyPay.additionalBreakDeductionMinutes > 0 ||
     dailyPay.roundedAwayMinutes > 0;
 
   return (
@@ -103,18 +103,24 @@ function PayExplanation({
       <dl className="space-y-1">
         {hourly ? (
           <>
-            <Line label="เวลาทำงานจริง" value={formatMinutes(pay.minutesBeforeRounding + pay.breakDeductionMinutes)} />
+            <Line label="เวลาทำงานจริง" value={formatMinutes(pay.actualWorkedMinutes)} />
             <Line
-              label="หักเวลาพัก"
-              value={pay.breakDeductionMinutes > 0 ? formatMinutes(pay.breakDeductionMinutes) : '0 นาที'}
+              label="เวลาพักจากการออกงานจริง"
+              value={pay.sessionGapMinutes > 0 ? formatMinutes(pay.sessionGapMinutes) : '0 นาที'}
             />
-            <Line label="หลังหักพัก" value={formatMinutes(pay.minutesBeforeRounding)} />
+            <Line label="เวลาพักที่บริษัทกำหนด" value={formatMinutes(pay.requiredBreakMinutes)} />
+            <Line
+              label="เวลาพักที่ระบบหักเพิ่ม"
+              value={formatMinutes(pay.additionalBreakDeductionMinutes)}
+              tone={pay.additionalBreakDeductionMinutes > 0 ? 'text-warning' : undefined}
+            />
+            <Line label="เวลาหลังหักพัก" value={formatMinutes(pay.minutesBeforeRounding)} />
             <Line
               label="ปัดเวลาออก"
               value={pay.roundedAwayMinutes > 0 ? `${formatNumber(pay.roundedAwayMinutes)} นาที` : '0 นาที'}
               tone={pay.roundedAwayMinutes > 0 ? 'text-warning' : undefined}
             />
-            <Line label="เวลาที่ใช้คิดเงิน" value={formatMinutes(pay.payableMinutes)} emphasis />
+            <Line label="เวลาที่ใช้คิดค่าจ้าง" value={formatMinutes(pay.payableMinutes)} emphasis />
             <Line label="ชั่วโมงทศนิยม" value={`${decimalHours} ชั่วโมง`} />
             <Line label="อัตรา" value={`${formatMoney(pay.basis)} บาท/ชม.`} />
           </>

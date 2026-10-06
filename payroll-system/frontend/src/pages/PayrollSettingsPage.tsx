@@ -91,7 +91,19 @@ function EmployeePayConfigurationTable({ canWrite }: { canWrite: boolean }) {
       hourlyRate: selected!.employmentType === 'DAILY' || selected!.employmentType === 'HOURLY' ? amount : null,
       effectiveFrom,
     }),
-    onSuccess: () => { toast.success('บันทึกอัตราค่าจ้างแล้ว'); setSelected(null); setAmount(''); setEffectiveFrom(''); void client.invalidateQueries({ queryKey: ['pay-configurations'] }); void client.invalidateQueries({ queryKey: ['employee-pay-profiles'] }); void client.invalidateQueries({ queryKey: ['employee-summary'] }); void client.invalidateQueries({ queryKey: ['pre-payroll-check'] }); },
+    onSuccess: () => {
+      toast.success('บันทึกอัตราค่าจ้างแล้ว');
+      setSelected(null);
+      setAmount('');
+      setEffectiveFrom('');
+      void client.invalidateQueries({ queryKey: ['pay-configurations'] });
+      void client.invalidateQueries({ queryKey: ['employee-pay-profiles'] });
+      void client.invalidateQueries({ queryKey: ['employee'] });
+      void client.invalidateQueries({ queryKey: ['employee-summary'] });
+      void client.invalidateQueries({ queryKey: ['employees'] });
+      void client.invalidateQueries({ queryKey: ['employee-completeness-summary'] });
+      void client.invalidateQueries({ queryKey: ['pre-payroll-check'] });
+    },
     onError: (error) => toast.error(apiErrorMessage(error)),
   });
   const open = (row: EmployeePayConfiguration) => {

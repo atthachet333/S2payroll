@@ -30,12 +30,11 @@ describe('current-day payroll readiness', () => {
     expect(text).toContain('attendanceRequired === false && e.leaveTrackingRequired === false');
   });
 
-  it('excludes inactive/deleted-like employees and employees outside the period', () => {
+  it('uses employment-date overlap regardless of current status', () => {
     const period = { startDate: new Date('2026-08-01'), endDate: new Date('2026-08-31') };
-    expect(isEmployeeEligibleForPayrollPeriod({ status: EmployeeStatus.INACTIVE, startDate: new Date('2026-08-01'), endDate: null }, period)).toBe(false);
-    expect(isEmployeeEligibleForPayrollPeriod({ status: EmployeeStatus.ACTIVE, startDate: new Date('2026-09-01'), endDate: null }, period)).toBe(false);
-    expect(isEmployeeEligibleForPayrollPeriod({ status: EmployeeStatus.ACTIVE, startDate: new Date('2026-01-01'), endDate: new Date('2026-07-31') }, period)).toBe(false);
-    expect(isEmployeeEligibleForPayrollPeriod({ status: EmployeeStatus.ACTIVE, startDate: new Date('2026-08-01'), endDate: null }, period)).toBe(true);
+    expect(isEmployeeEligibleForPayrollPeriod({ startDate: new Date('2026-08-01'), endDate: null }, period)).toBe(true);
+    expect(isEmployeeEligibleForPayrollPeriod({ startDate: new Date('2026-09-01'), endDate: null }, period)).toBe(false);
+    expect(isEmployeeEligibleForPayrollPeriod({ startDate: new Date('2026-01-01'), endDate: new Date('2026-07-31') }, period)).toBe(false);
   });
 
   it('collapses compensation blockers into monthly or hourly categories', () => {
@@ -49,9 +48,11 @@ describe('current-day payroll readiness', () => {
 
   it('checks effective-date coverage and never backfills a later profile', () => {
     const text = source('backend/src/services/pre-payroll-check.service.ts');
+    const resolver = source('backend/src/services/pay-profile-resolution.ts');
     expect(text).toContain("code: 'MISSING_PAY_PROFILE_FOR_DATE_RANGE'");
-    expect(text).toContain('profile.effectiveFrom <= date');
-    expect(text).toContain('profile.effectiveTo >= date');
+    expect(text).toContain('profileCoversDate(p, d)');
+    expect(resolver).toContain('profile.effectiveFrom <= effectiveDate');
+    expect(resolver).toContain('profile.effectiveTo >= effectiveDate');
   });
 
   it('keeps monthly and hourly calculation rules decimal-safe', () => {

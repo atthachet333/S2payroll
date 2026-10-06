@@ -201,7 +201,6 @@ export default function EmployeeDetailDrawer({
     payType === 'DAILY' || payType === 'HOURLY'
         ? 'อัตราค่าจ้างรายชั่วโมง'
         : 'เงินเดือนพื้นฐาน';
-  const compensationUnit = payType === 'DAILY' || payType === 'HOURLY' ? ' / ชั่วโมง' : '';
 
   // Only render contact rows that carry a value, so the card never becomes a
   // column of dashes. Values are shown as stored - this pass introduces no
@@ -406,10 +405,10 @@ export default function EmployeeDetailDrawer({
                     accent="emerald"
                     emphasis
                   >
-                    {payProfilesQuery.data && payProfilesQuery.data.length > 0 ? (
+                    {detail.effectivePayProfile ? (
                       <div className="space-y-3">
-                        {payProfilesQuery.data.map((profile, index) => (
-                          <div key={profile.id} className={index ? 'border-t border-border/60 pt-3' : ''}>
+                        {[detail.effectivePayProfile].map((profile) => (
+                          <div key={profile.id}>
                             <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                               {profile.payType === 'MONTHLY' ? 'รายเดือน' : 'คิดตามชั่วโมง'} · เริ่มใช้ {formatDate(profile.effectiveFrom)}
                             </p>
@@ -422,18 +421,11 @@ export default function EmployeeDetailDrawer({
                             {profile.effectiveTo && <p className="mt-0.5 text-xs text-muted-foreground">ถึง {formatDate(profile.effectiveTo)}</p>}
                           </div>
                         ))}
-                      </div>
-                    ) : Number(detail.baseSalary) > 0 ? (
-                      <div>
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          {compensationLabel}
-                        </p>
-                        <p className="mt-1 text-2xl font-semibold tracking-tight text-foreground">
-                          {formatMoney(detail.baseSalary)}
-                          <span className="ml-1.5 text-sm font-normal text-muted-foreground">
-                            บาท{compensationUnit}
-                          </span>
-                        </p>
+                        {payProfilesQuery.data && payProfilesQuery.data.length > 1 && (
+                          <p className="border-t border-border/60 pt-2 text-xs text-muted-foreground">
+                            ประวัติอัตราค่าจ้างทั้งหมด {payProfilesQuery.data.length} รายการ
+                          </p>
+                        )}
                       </div>
                     ) : exempt ? (
                       // Not required of this employee, so this is information,
@@ -444,22 +436,6 @@ export default function EmployeeDetailDrawer({
                         </p>
                         <p className="mt-0.5 text-sm font-medium text-slate-600">
                           ไม่บังคับสำหรับผู้บริหาร
-                        </p>
-                      </div>
-                    ) : !completeness?.compensationRequired ? (
-                      // A daily/hourly rate is payroll configuration, not master
-                      // data, so an unset amount is a pending step rather than a
-                      // defect. Payroll's own pre-check still blocks on it.
-                      <div className="rounded-lg bg-slate-50 px-3.5 py-3">
-                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          {compensationLabel}
-                        </p>
-                        <p className="mt-0.5 text-sm font-medium text-slate-600">
-                          ยังไม่ได้กำหนด
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          ข้อมูลค่าจ้างจะกำหนดในขั้นตอน Payroll
-                          ไม่มีผลกับความครบถ้วนของข้อมูลพนักงาน
                         </p>
                       </div>
                     ) : (

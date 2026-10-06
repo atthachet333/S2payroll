@@ -85,7 +85,7 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
   },
   // Withdrawn, and deliberately left at false. The daily break is now applied
   // once, in the payroll layer, by DAILY_BREAK_THRESHOLD_MINUTES /
-  // DAILY_BREAK_DEDUCTION_MINUTES. Attendance keeps the true observed duration
+  // DAILY_REQUIRED_BREAK_MINUTES. Attendance keeps the true observed duration
   // so the record still says what actually happened. Turning this back on would
   // deduct the break twice - once from the stored time and once again from pay.
   {
@@ -128,20 +128,20 @@ export const DEFAULT_PAYROLL_SETTINGS: SettingDefinition[] = [
   },
   {
     key: 'DAILY_BREAK_THRESHOLD_MINUTES',
-    value: '480',
+    value: '240',
     valueType: SettingValueType.NUMBER,
     group: 'DEDUCTION',
     label: 'เกณฑ์หักเวลาพักพนักงานรายวัน (นาที)',
     description:
-      'ทำงาน "มากกว่า" ค่านี้จึงหักเวลาพัก ทำงานเท่ากับ 480 นาทีพอดีจะไม่ถูกหัก',
+      'ใช้เฉพาะพนักงาน DAILY: ทำงานจริง "มากกว่า" 240 นาทีจึงต้องมีเวลาพักรวม 60 นาที โดยช่วงที่ออกงานจริงระหว่างรอบจะนับเป็นเครดิตและไม่ถูกหักซ้ำ',
   },
   {
-    key: 'DAILY_BREAK_DEDUCTION_MINUTES',
+    key: 'DAILY_REQUIRED_BREAK_MINUTES',
     value: '60',
     valueType: SettingValueType.NUMBER,
     group: 'DEDUCTION',
-    label: 'เวลาพักที่หักของพนักงานรายวัน (นาที)',
-    description: 'หักออกจากเวลาทำงานก่อนปัดเวลา ใช้เฉพาะเมื่อทำงานเกินเกณฑ์ข้างต้น',
+    label: 'เวลาพักที่บริษัทกำหนดสำหรับพนักงานรายวัน (นาที)',
+    description: 'ระบบหักเฉพาะส่วนที่ยังขาดจากช่วงออกงานจริง ก่อนปัดเวลาลงตามช่วงเวลากลาง',
   },
   {
     key: 'DAILY_OT_ENABLED',

@@ -15,6 +15,7 @@ import { loadSettings } from './settings.service.js';
 import { floorToInterval, roundingIntervalMinutes } from '../utils/time-rounding.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
+import { attachLeaveTypes } from './leave-display.service.js';
 
 export interface EmployeeListParams {
   /** Master-data completeness, evaluated by employee-completeness.service. */
@@ -32,7 +33,17 @@ const employeeInclude = {
   position: { select: { id: true, code: true, name: true } },
 } satisfies Prisma.EmployeeInclude;
 
+const effectivePayProfiles = (effectiveDate: Date) => ({
+  where: {
+    isActive: true,
+    effectiveFrom: { lte: effectiveDate },
+    OR: [{ effectiveTo: null }, { effectiveTo: { gte: effectiveDate } }],
+  },
+  orderBy: { effectiveFrom: 'desc' as const },
+});
+
 export async function listEmployees(params: EmployeeListParams) {
+  const effectiveDate = dayjs.utc().startOf('day').toDate();
   const where: Prisma.EmployeeWhereInput = {
     ...(params.status ? { status: params.status } : {}),
     ...(params.departmentId ? { departmentId: params.departmentId } : {}),
@@ -51,13 +62,13 @@ export async function listEmployees(params: EmployeeListParams) {
       : {}),
     // Applied in the database so it composes with pagination and the other
     // filters rather than trimming an already-paged slice.
-    ...(params.completeness ? completenessWhere(params.completeness) : {}),
+    ...(params.completeness ? completenessWhere(params.completeness, effectiveDate) : {}),
   };
 
   const [items, total] = await Promise.all([
     prisma.employee.findMany({
       where,
-      include: employeeInclude,
+      include: { ...employeeInclude, payProfiles: effectivePayProfiles(effectiveDate) },
       orderBy: { employeeCode: 'asc' },
       skip: (params.page - 1) * params.pageSize,
       take: params.pageSize,
@@ -66,7 +77,7 @@ export async function listEmployees(params: EmployeeListParams) {
   ]);
 
   return {
-    items: items.map(withProfileCompleteness),
+    items: items.map((employee) => withProfileCompleteness(employee, effectiveDate)),
     total,
     page: params.page,
     pageSize: params.pageSize,
@@ -74,15 +85,17 @@ export async function listEmployees(params: EmployeeListParams) {
 }
 
 export async function getEmployee(id: string) {
+  const effectiveDate = dayjs.utc().startOf('day').toDate();
   const employee = await prisma.employee.findUnique({
     where: { id },
     include: {
       ...employeeInclude,
       salaryHistory: { orderBy: { effectiveDate: 'desc' } },
+      payProfiles: effectivePayProfiles(effectiveDate),
     },
   });
   if (!employee) throw notFound('Employee');
-  return withProfileCompleteness(employee);
+  return withProfileCompleteness(employee, effectiveDate);
 }
 
 export interface EmployeeInput {
@@ -246,15 +259,23 @@ export async function updateEmployee(
 }
 
 /** Employees are never hard-deleted; deactivation preserves payroll history. */
-export async function deactivateEmployee(id: string, reason: string, actor: Actor) {
+export async function deactivateEmployee(
+  id: string,
+  input: { endDate: string; reason: string },
+  actor: Actor
+) {
   const current = await prisma.employee.findUnique({ where: { id } });
   if (!current) throw notFound('Employee');
+  const endDate = dayjs.utc(input.endDate).startOf('day');
+  if (endDate.isBefore(dayjs.utc(current.startDate), 'day')) {
+    throw badRequest('วันที่สิ้นสุดการทำงานต้องไม่ก่อนวันที่เริ่มงาน');
+  }
 
   const employee = await prisma.employee.update({
     where: { id },
     data: {
       status: EmployeeStatus.INACTIVE,
-      endDate: current.endDate ?? dayjs.utc().startOf('day').toDate(),
+      endDate: endDate.toDate(),
     },
     include: employeeInclude,
   });
@@ -263,9 +284,9 @@ export async function deactivateEmployee(id: string, reason: string, actor: Acto
     action: 'EMPLOYEE_DEACTIVATE',
     entity: 'Employee',
     entityId: id,
-    oldValue: { status: current.status },
-    newValue: { status: EmployeeStatus.INACTIVE },
-    reason,
+    oldValue: { status: current.status, endDate: current.endDate },
+    newValue: { status: EmployeeStatus.INACTIVE, endDate: input.endDate },
+    reason: input.reason,
     userId: actor.userId,
     userEmail: actor.email,
     ipAddress: actor.ip,
@@ -445,7 +466,8 @@ export async function employeeAttendanceHistory(
     where: { id },
     select: { id: true, employmentType: true, attendanceRequired: true },
   });
-  const effectiveItems = await attachAttendanceSessions(items);
+  const sessionItems = await attachAttendanceSessions(items);
+  const effectiveItems = await attachLeaveTypes(sessionItems);
   const valuations = await valueAttendanceRecords(
     effectiveItems.map((item) => ({
       id: item.id,
@@ -457,6 +479,9 @@ export async function employeeAttendanceHistory(
       isHoliday: item.isHoliday,
       isWeekend: item.isWeekend,
       status: item.status,
+      sessions: item.sessions,
+      hasOpenSession: item.hasOpenSession,
+      malformedSequence: item.malformedSequence,
     })),
     new Map([[employee.id, employee]])
   );
@@ -503,11 +528,13 @@ export const updatePosition = (
  * disagree with the count above the table.
  */
 export async function employeeCompletenessSummary() {
+  const effectiveDate = dayjs.utc().startOf('day').toDate();
   const employees = await prisma.employee.findMany({
     select: {
       employeeCode: true, firstName: true, lastName: true, employmentType: true,
       departmentId: true, positionId: true, startDate: true, status: true, baseSalary: true,
       attendanceRequired: true, leaveTrackingRequired: true,
+      payProfiles: effectivePayProfiles(effectiveDate),
     },
     orderBy: { employeeCode: 'asc' },
   });
@@ -515,7 +542,7 @@ export async function employeeCompletenessSummary() {
   const evaluated = employees.map((employee) => ({
     employeeCode: employee.employeeCode,
     name: `${employee.firstName} ${employee.lastName}`.trim(),
-    ...evaluateEmployeeProfileCompleteness(employee),
+    ...evaluateEmployeeProfileCompleteness(employee, effectiveDate),
   }));
 
   return {

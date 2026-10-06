@@ -250,7 +250,7 @@ describe('DAILY attendance policy', () => {
     expect(daily(at(8, 30), at(14, 36), { DAILY_DEDUCT_BREAK: 'true' }).workedMinutes).toBe(366);
   });
 
-  it('keeps the full duration even on a shift past eight hours', () => {
+  it('keeps the full duration even on a long DAILY shift', () => {
     // 08:30 to 17:14 is 524 minutes. Payroll will pay 450 of them; the record
     // still says 524, because that is what happened.
     expect(daily(at(8, 30), at(17, 14)).workedMinutes).toBe(524);

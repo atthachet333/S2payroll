@@ -4,6 +4,7 @@ import type { Actor } from './payroll.service.js';
 import { dayjs } from '../utils/datetime.js';
 import { badRequest, notFound } from '../utils/errors.js';
 import { recordAudit } from './audit.service.js';
+import { resolveEffectivePayProfile } from './pay-profile-resolution.js';
 
 export interface PayProfileInput {
   payType: PayType;
@@ -39,12 +40,12 @@ export async function listEmployeePayConfigurations() {
       attendanceRequired: true, leaveTrackingRequired: true,
       payProfiles: {
         where: { isActive: true, effectiveFrom: { lte: today }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }] },
-        orderBy: { effectiveFrom: 'desc' }, take: 1,
+        orderBy: { effectiveFrom: 'desc' },
       },
     },
   });
   return employees.map(({ payProfiles, ...employee }) => {
-    const profile = payProfiles[0] ?? null;
+    const profile = resolveEffectivePayProfile(payProfiles, employee.employmentType, today);
     const legacyConfigured = new Prisma.Decimal(employee.baseSalary).greaterThan(0);
     return ({
     ...employee,

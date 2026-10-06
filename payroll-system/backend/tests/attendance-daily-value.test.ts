@@ -90,15 +90,15 @@ const value = (over: Record<string, unknown> = {}) =>
 // ---------------------------------------------------------------------------
 
 describe('DAILY daily earning', () => {
-  // Payable minutes drive the money: over eight hours loses an unpaid hour,
-  // and the remainder is floored to 15 minutes.
+  // Payable minutes drive the money: over four hours requires a one-hour break,
+  // with completed session gaps credited before the remainder is floored.
   const cases: [number, number, string][] = [
     [60, 60, '60.00'],
     [75, 90, '112.50'],
     [93, 30, '46.50'],
     [100, 540, '800.00'],
     [75, 540, '600.00'],
-    [60, 480, '480.00'],
+    [60, 480, '420.00'],
   ];
 
   it.each(cases)('pays %d THB/h for %d minutes as %s', (rate, minutes, expected) => {
@@ -132,9 +132,9 @@ describe('DAILY daily earning', () => {
   it('uses the rate in force on the day, not the latest rate', () => {
     const profiles = [profile('60', '2026-08-01', '2026-08-15'), profile('75', '2026-08-16')];
     expect(value({ profiles, record: { workDate: new Date('2026-08-10T00:00:00.000Z') } }).gross)
-      .toBe('480.00');
+      .toBe('420.00');
     expect(value({ profiles, record: { workDate: new Date('2026-08-20T00:00:00.000Z') } }).gross)
-      .toBe('600.00');
+      .toBe('525.00');
   });
 
   it('never charges lateness to a daily employee', () => {
@@ -301,7 +301,7 @@ describe('attendance and payroll agree', () => {
     const total = days
       .map((minutes) => Number(value({ record: { workedMinutes: minutes }, profiles }).net))
       .reduce((a, b) => a + b, 0);
-    expect(total.toFixed(2)).toBe('1593.75');
+    expect(total.toFixed(2)).toBe('1443.75');
   });
 
   it('does not invite summing a MONTHLY month back into the salary', () => {

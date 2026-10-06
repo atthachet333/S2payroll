@@ -309,7 +309,7 @@ describe('line items always reconcile with header totals', () => {
       expect(incomeSum.toFixed(2)).toBe(result.grossIncome.toFixed(2));
       expect(deductionSum.toFixed(2)).toBe(result.totalDeduction.toFixed(2));
       expect(result.grossIncome.minus(result.totalDeduction).toFixed(2)).toBe(
-        result.netSalary.toFixed(2)
+        result.netPayBeforeRounding.toFixed(2)
       );
     });
   }

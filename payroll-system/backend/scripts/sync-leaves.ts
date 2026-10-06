@@ -10,7 +10,6 @@ import 'dotenv/config';
 import { prisma } from '../src/plugins/prisma.js';
 import { checkDatabaseUrl } from './db-guard.js';
 import { importLeaves, previewLeaveSync } from '../src/services/leave-sync.service.js';
-import { recalculateRange } from '../src/services/attendance.service.js';
 
 const CONFIRM = process.argv.includes('--confirm');
 const tabArg = process.argv.find((a) => a.startsWith('--tab='));
@@ -78,14 +77,6 @@ async function main(): Promise<void> {
 
   const total = await prisma.leaveRecord.count();
   console.log(`leave_records total = ${total}`);
-
-  // Approved leave changes how a work day is interpreted, so refresh the
-  // affected attendance rows against the newly known leave.
-  const range = await prisma.leaveRecord.aggregate({ _min: { startDate: true }, _max: { endDate: true } });
-  if (range._min.startDate && range._max.endDate) {
-    const updated = await recalculateRange(range._min.startDate, range._max.endDate);
-    console.log(`attendance rows recalculated over leave range: ${updated.updated} (locked, skipped: ${updated.skippedLocked})`);
-  }
 
   const leaveDays = await prisma.attendanceRecord.count({ where: { status: 'LEAVE' } });
   console.log(`attendance rows now marked LEAVE = ${leaveDays}`);

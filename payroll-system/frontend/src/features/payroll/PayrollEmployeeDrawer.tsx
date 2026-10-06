@@ -301,28 +301,18 @@ export default function PayrollEmployeeDrawer({
                                 : 'ยังไม่ได้กำหนด'
                             }
                           />
-                          {/* Actual and paid time are shown as separate lines
-                              on purpose: a day past eight hours loses an unpaid
-                              break and the remainder is floored to 15 minutes,
-                              so the two figures genuinely differ and the
-                              payslip has to be able to explain why. */}
                           <InfoRow
                             label="เวลาทำงานจริง"
                             value={formatMinutes(Math.round(Number(row.workingHours) * 60))}
                           />
-                          {row.breakDeductionMinutes > 0 && (
+                          {row.employmentType === 'DAILY' && (
                             <>
-                              <InfoRow
-                                label="หักเวลาพัก"
-                                value={formatMinutes(row.breakDeductionMinutes)}
-                              />
-                              <InfoRow
-                                label="หลังหักพัก"
-                                value={formatMinutes(
-                                  Math.round(Number(row.workingHours) * 60) -
-                                    row.breakDeductionMinutes
-                                )}
-                              />
+                              {/* DAILY break credit is accumulated per workday by
+                                  the backend; this drawer only displays the audit trail. */}
+                              <InfoRow label="เวลาพักจริงระหว่างรอบ" value={formatMinutes(row.sessionGapMinutes)} />
+                              <InfoRow label="เวลาพักที่บริษัทกำหนด" value={formatMinutes(row.requiredBreakMinutes)} />
+                              <InfoRow label="เวลาพักจริงที่นับเป็นเครดิต" value={formatMinutes(row.creditedBreakMinutes)} />
+                              <InfoRow label="เวลาพักที่ระบบหักเพิ่ม" value={formatMinutes(row.additionalBreakDeductionMinutes)} />
                             </>
                           )}
                           {/* Rows calculated before payable time was recorded
@@ -412,9 +402,15 @@ export default function PayrollEmployeeDrawer({
                     </div>
                   </Section>
 
+                  {row.roundingAdjustment != null && Number(row.roundingAdjustment) !== 0 && (
+                    <div className="mb-3 divide-y divide-border rounded-xl border border-border px-4 text-sm">
+                      <InfoRow label="ยอดสุทธิก่อนปัด" value={`${formatMoney(row.netSalaryBeforeRounding ?? row.netSalary)} บาท`} />
+                      <InfoRow label="ปรับเศษ" value={`${Number(row.roundingAdjustment) > 0 ? '+' : ''}${formatMoney(row.roundingAdjustment)} บาท`} />
+                    </div>
+                  )}
                   <div className="flex items-center justify-between rounded-xl bg-primary px-5 py-4 text-primary-foreground">
                     <span className="text-sm font-medium">
-                      {row.payConfigured ? 'เงินเดือนสุทธิ' : 'ยอดที่คำนวณได้ (ยังไม่ใช่ยอดสุทธิ)'}
+                      {row.payConfigured ? 'ยอดจ่ายจริง' : 'ยอดที่คำนวณได้ (ยังไม่ใช่ยอดสุทธิ)'}
                       {row.payConfigured && row.isEstimate && (
                         <span className="ml-2 rounded bg-primary-foreground/20 px-1.5 py-0.5 text-xs">
                           ประมาณการ
@@ -422,7 +418,7 @@ export default function PayrollEmployeeDrawer({
                       )}
                     </span>
                     <span className="text-2xl font-semibold tabular-nums">
-                      {formatMoney(row.netSalary)} <span className="text-sm font-normal">บาท</span>
+                      {formatMoney(row.netSalary, 0)} <span className="text-sm font-normal">บาท</span>
                     </span>
                   </div>
                 </TabsContent>

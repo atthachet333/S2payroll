@@ -124,6 +124,12 @@ const eventOrder = (event: AttendanceSourceEvent): number => {
   return Number.MAX_SAFE_INTEGER - 10_000 + event.sheetRow;
 };
 
+/** Actual event instant when the source supplied one; never synthesizes a day. */
+export const sourceEventInstant = (event: AttendanceSourceEvent): Date | null => {
+  const timestamp = Date.parse(event.timestamp);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+};
+
 /** Pair punches strictly in chronological order without inventing a timestamp. */
 export function pairAttendanceEvents(events: AttendanceSourceEvent[]): {
   sessions: ResolvedAttendanceSession[];
@@ -148,13 +154,18 @@ export function pairAttendanceEvents(events: AttendanceSourceEvent[]): {
       sessions.push({ checkIn: null, checkOut: event, durationMinutes: 0 });
       continue;
     }
+    const startInstant = sourceEventInstant(open.checkIn!);
+    const endInstant = sourceEventInstant(event);
     const start = timeMinutes(open.checkIn!.time)!;
     const end = timeMinutes(event.time)!;
-    if (end < start) {
+    const durationMinutes = startInstant && endInstant
+      ? Math.floor((endInstant.getTime() - startInstant.getTime()) / 60_000)
+      : end - start;
+    if (durationMinutes < 0) {
       issues.push(`OUT ก่อน IN ที่แถว ${event.sheetRow}`);
     } else {
       open.checkOut = event;
-      open.durationMinutes = end - start;
+      open.durationMinutes = durationMinutes;
     }
     open = null;
   }

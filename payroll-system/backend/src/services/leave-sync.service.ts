@@ -181,9 +181,9 @@ export async function previewLeaveSync(tab = LEAVE_SHEET_TAB): Promise<LeaveSync
     totalSheetRows: rows.length,
     rows: preview,
     counts,
-    // Unknown employees are reported and skipped, not treated as a hard block:
-    // one unmatched request must not stop every valid leave from importing.
-    importable: blockers.length === 0,
+    // Row-level faults are isolated. Sheet-wide structure was validated above,
+    // so valid rows remain importable and the source reports PARTIAL.
+    importable: true,
     blockers,
   };
 }
@@ -195,6 +195,8 @@ export interface LeaveSyncResult {
   skippedUnknownEmployee: string[];
   skippedExemptEmployee: string[];
   skippedInvalid: number;
+  skippedDuplicateRequest: number;
+  invalidRows: Array<{ sheetRow: number; errors: string[] }>;
   requestIds: string[];
   attendanceCreated: number;
   attendanceSkippedLocked: number;
@@ -218,7 +220,10 @@ export async function materializeApprovedLeaveAttendance(): Promise<{
       include: { employee: { select: { employeeCode: true, otEligible: true } } },
     }),
     prisma.holiday.findMany({ select: { date: true } }),
-    prisma.payrollPeriod.findMany({ where: { status: 'LOCKED' }, select: { startDate: true, endDate: true } }),
+    prisma.payrollPeriod.findMany({
+      where: { status: { in: ['APPROVED', 'PAID', 'LOCKED'] } },
+      select: { startDate: true, endDate: true },
+    }),
   ]);
   const holidaySet = new Set(holidays.map((h) => dayjs.utc(h.date).format('YYYY-MM-DD')));
   let created = 0;
@@ -228,11 +233,17 @@ export async function materializeApprovedLeaveAttendance(): Promise<{
     // Fractional leave requires an explicit company policy and reliable source
     // duration; it is intentionally not converted into a full-day record.
     if (!Number.isInteger(Number(leave.totalDays))) continue;
+    const candidateDates: Date[] = [];
     for (let cursor = dayjs.utc(leave.startDate); !cursor.isAfter(dayjs.utc(leave.endDate), 'day'); cursor = cursor.add(1, 'day')) {
-      const workDate = cursor.startOf('day').toDate();
-      const key = cursor.format('YYYY-MM-DD');
-      if (holidaySet.has(key)) continue;
-      if (!isScheduledWorkday(workDate, settings)) continue;
+      const candidate = cursor.startOf('day').toDate();
+      if (!holidaySet.has(cursor.format('YYYY-MM-DD')) && isScheduledWorkday(candidate, settings)) {
+        candidateDates.push(candidate);
+      }
+    }
+    // totalDays is computed server-side by the HR bot and is authoritative.
+    // Limiting the materialised days also protects against a stale payroll
+    // holiday list expanding a one-day request into multiple paid leave days.
+    for (const workDate of candidateDates.slice(0, Number(leave.totalDays))) {
       if (lockedPeriods.some((p) => p.startDate <= workDate && p.endDate >= workDate)) {
         skippedLocked += 1;
         continue;
@@ -283,13 +294,24 @@ export async function importLeaves(options: {
 
   const result: LeaveSyncResult = {
     created: 0, updated: 0, unchanged: 0,
-    skippedUnknownEmployee: [], skippedExemptEmployee: [], skippedInvalid: 0, requestIds: [],
+    skippedUnknownEmployee: [], skippedExemptEmployee: [], skippedInvalid: 0,
+    skippedDuplicateRequest: 0, invalidRows: [], requestIds: [],
     attendanceCreated: 0, attendanceSkippedLocked: 0,
     attendanceRecalculated: 0,
   };
 
+  const duplicateRequestIds = new Set(findDuplicateRequestIds(rows));
+  const changedDateRanges: Array<{ startDate: Date; endDate: Date }> = [];
   for (const row of rows) {
-    if (row.errors.length > 0) { result.skippedInvalid += 1; continue; }
+    if (row.errors.length > 0) {
+      result.skippedInvalid += 1;
+      result.invalidRows.push({ sheetRow: row.sheetRow, errors: [...row.errors] });
+      continue;
+    }
+    if (duplicateRequestIds.has(row.requestId)) {
+      result.skippedDuplicateRequest += 1;
+      continue;
+    }
     const employee = employeeByCode.get(row.employeeCode);
     if (!employee) { result.skippedUnknownEmployee.push(`${row.requestId} (${row.employeeCode})`); continue; }
     if (!employee.leaveTrackingRequired) { result.skippedExemptEmployee.push(`${row.requestId} (${row.employeeCode})`); continue; }
@@ -320,6 +342,7 @@ export async function importLeaves(options: {
     if (!existing) {
       await prisma.leaveRecord.create({ data: { ...payload, sourceRequestId: row.requestId } });
       result.created += 1;
+      changedDateRanges.push({ startDate, endDate });
     } else {
       const same =
         existing.employeeId === payload.employeeId &&
@@ -334,6 +357,7 @@ export async function importLeaves(options: {
       } else {
         await prisma.leaveRecord.update({ where: { id: existing.id }, data: payload });
         result.updated += 1;
+        changedDateRanges.push({ startDate, endDate });
       }
     }
     result.requestIds.push(row.requestId);
@@ -342,10 +366,12 @@ export async function importLeaves(options: {
   const attendance = await materializeApprovedLeaveAttendance();
   result.attendanceCreated = attendance.created;
   result.attendanceSkippedLocked = attendance.skippedLocked;
-  const validDates = rows.flatMap((row) => [row.startDate, row.endDate]).filter((date): date is string => Boolean(date)).sort();
-  if (validDates.length > 0) {
-    const recalculated = await recalculateRange(utcDate(validDates[0]), utcDate(validDates.at(-1)!));
-    result.attendanceRecalculated = recalculated.updated;
+  // Re-evaluate only dates whose leave record was created or changed. This
+  // avoids rewriting old attendance merely because an unchanged historical
+  // request is still present in the source sheet.
+  for (const range of changedDateRanges) {
+    const recalculated = await recalculateRange(range.startDate, range.endDate);
+    result.attendanceRecalculated += recalculated.updated;
     result.attendanceSkippedLocked += recalculated.skippedLocked;
   }
 

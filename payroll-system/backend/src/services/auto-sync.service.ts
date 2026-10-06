@@ -38,7 +38,7 @@ export function overallSyncStatus(failedSources: number, totalSources = 3): Sync
 }
 
 export interface SyncSourceStatus {
-  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED';
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
   lastSuccessfulAt: string | null;
@@ -202,8 +202,8 @@ class AutoSyncScheduler {
     // others, and must never propagate out of the cycle.
     let failedSources = 0;
     for (const source of ['employees', 'attendance', 'leave'] as const) {
-      const ok = await this.runSource(source);
-      if (!ok) failedSources += 1;
+      const sourceStatus = await this.runSource(source);
+      if (sourceStatus !== 'SUCCESS') failedSources += 1;
     }
 
     this.status.cyclesRun += 1;
@@ -220,18 +220,19 @@ class AutoSyncScheduler {
     return this.getLiveStatus();
   }
 
-  private async runSource(source: SyncSourceName): Promise<boolean> {
+  private async runSource(source: SyncSourceName): Promise<'SUCCESS' | 'PARTIAL' | 'FAILED'> {
     const entry = this.status.sources[source];
     entry.status = 'RUNNING';
     entry.lastStartedAt = new Date().toISOString();
     try {
-      const counts = await this.executeSource(source);
-      entry.lastCounts = counts;
+      const result = await this.executeSource(source);
+      entry.lastCounts = result.counts;
       entry.lastCompletedAt = new Date().toISOString();
       entry.lastSuccessfulAt = entry.lastCompletedAt;
-      entry.lastErrorSummary = null;
-      entry.status = 'SUCCESS';
-      return true;
+      entry.lastErrorSummary = result.partialSummary ?? null;
+      entry.status = result.partialSummary ? 'PARTIAL' : 'SUCCESS';
+      if (result.partialSummary) this.status.lastErrorSummary = result.partialSummary;
+      return entry.status;
     } catch (error) {
       const summary = safeErrorSummary(error);
       entry.lastCompletedAt = new Date().toISOString();
@@ -240,7 +241,7 @@ class AutoSyncScheduler {
       entry.status = 'FAILED';
       this.status.lastErrorSummary = summary;
       this.logger?.warn({ source, summary }, 'Auto-sync source failed');
-      return false;
+      return 'FAILED';
     }
   }
 
@@ -248,24 +249,27 @@ class AutoSyncScheduler {
    * Delegates to the existing sync services. No Google parsing or import logic
    * is reimplemented here.
    */
-  private async executeSource(source: SyncSourceName): Promise<Record<string, number>> {
+  private async executeSource(source: SyncSourceName): Promise<{
+    counts: Record<string, number>;
+    partialSummary?: string;
+  }> {
     if (source === 'employees') {
       const result = await importEmployees({
         // The sheet carries no hire date; new employees start today and are
         // flagged for payroll review, exactly as the manual import does.
         defaultStartDate: new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z'),
       });
-      return {
+      return { counts: {
         created: result.created,
         updated: result.updated,
         unchanged: result.unchanged,
-      };
+      } };
     }
 
     if (source === 'attendance') {
       const actor = await this.systemActor();
       const result = await syncAttendance({ actor });
-      return {
+      return { counts: {
         imported: result.imported,
         updated: result.updated,
         duplicates: result.duplicates,
@@ -273,17 +277,24 @@ class AutoSyncScheduler {
         skipped: result.skipped,
         invalid: result.invalid,
         unknownEmployee: result.unknownEmployee,
-      };
+      } };
     }
 
     const result = await importLeaves({});
-    return {
+    const diagnostics = result.invalidRows.map(
+      (row) => `แถว ${row.sheetRow}: ${row.errors.join('; ')}`
+    );
+    return { counts: {
       created: result.created,
       updated: result.updated,
       unchanged: result.unchanged,
       skippedInvalid: result.skippedInvalid,
+      skippedDuplicateRequest: result.skippedDuplicateRequest,
       skippedUnknownEmployee: result.skippedUnknownEmployee.length,
-    };
+    }, partialSummary:
+      result.skippedInvalid > 0 || result.skippedDuplicateRequest > 0 || result.skippedUnknownEmployee.length > 0
+        ? `ข้อมูลการลาสำเร็จบางส่วน — ${diagnostics.join(', ') || 'มีแถวที่ถูกข้าม'}`
+        : undefined };
   }
 
   /** Attribute automated writes to the bootstrap admin, as manual syncs are. */

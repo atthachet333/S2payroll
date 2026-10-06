@@ -2,6 +2,13 @@ import { prisma } from '../plugins/prisma.js';
 import { attendanceSummary } from './attendance.service.js';
 import { money } from '../utils/money.js';
 import { dayjs, monthBounds, thaiMonthLabel, thaiMonthShortLabel } from '../utils/datetime.js';
+import {
+  payrollEligibleEmployeeWhere,
+  payrollEmployeeVisibilityWhere,
+  payrollVisibleEmployeeWhere,
+  shouldApplyEmploymentOverlapToPayrollRows,
+  visiblePayrollRowsForPeriod,
+} from './employee-payroll-eligibility.service.js';
 
 const TREND_STATUSES = ['CALCULATED', 'REVIEW', 'APPROVED', 'PAID', 'LOCKED'] as const;
 
@@ -11,12 +18,15 @@ type TrendPeriod = {
   year: number;
   month: number;
   status: string;
+  startDate?: Date;
+  endDate?: Date;
   payrollEmployees: Array<{
     grossIncome: unknown;
     netSalary: unknown;
     otAmount: unknown;
     totalDeduction: unknown;
     isEstimate: boolean;
+    employee?: { startDate: Date; endDate: Date | null; reactivatedAt: Date | null; status: string };
   }>;
 };
 
@@ -50,8 +60,14 @@ export function buildPayrollTrend(periods: TrendPeriod[], monthCount: number, an
       };
     }
 
+    const payrollEmployees = period.startDate && period.endDate && period.payrollEmployees.every((row) => row.employee)
+      ? visiblePayrollRowsForPeriod(
+          period.payrollEmployees as Array<typeof period.payrollEmployees[number] & { employee: NonNullable<typeof period.payrollEmployees[number]['employee']> }>,
+          { status: period.status as any, startDate: period.startDate, endDate: period.endDate }
+        )
+      : period.payrollEmployees;
     const sum = (key: 'grossIncome' | 'netSalary' | 'otAmount' | 'totalDeduction') =>
-      period.payrollEmployees.reduce((total, row) => total.plus(money(row[key] as any ?? 0)), money(0));
+      payrollEmployees.reduce((total, row) => total.plus(money(row[key] as any ?? 0)), money(0));
 
     return {
       code,
@@ -63,7 +79,7 @@ export function buildPayrollTrend(periods: TrendPeriod[], monthCount: number, an
       ot: Number(sum('otAmount').toFixed(2)),
       deduction: Number(sum('totalDeduction').toFixed(2)),
       status: period.status,
-      isEstimate: period.payrollEmployees.some((row) => row.isEstimate),
+      isEstimate: payrollEmployees.some((row) => row.isEstimate),
     };
   });
 }
@@ -82,20 +98,27 @@ export async function getOverview(periodId?: string, trendMonths = 6) {
   const bounds = period
     ? { startDate: period.startDate, endDate: period.endDate }
     : monthBounds(now.year(), now.month() + 1);
+  const visiblePayrollWhere = period
+    ? { periodId: period.id, ...payrollEmployeeVisibilityWhere(period) }
+    : null;
 
   const [totalEmployees, attendance, payrollTotals, statusGroups, trendPeriods] = await Promise.all([
-    prisma.employee.count({ where: { status: { in: ['ACTIVE', 'PROBATION'] } } }),
+    period
+      ? shouldApplyEmploymentOverlapToPayrollRows(period)
+        ? prisma.employee.count({ where: payrollVisibleEmployeeWhere(period) })
+        : prisma.payrollEmployee.count({ where: { periodId: period.id } })
+      : prisma.employee.count({ where: payrollEligibleEmployeeWhere(bounds) }),
     attendanceSummary(bounds.startDate, bounds.endDate),
     period
       ? prisma.payrollEmployee.aggregate({
-          where: { periodId: period.id },
+          where: visiblePayrollWhere!,
           _sum: { grossIncome: true, netSalary: true, otAmount: true, otHours: true, workingHours: true },
         })
       : Promise.resolve(null),
     period
       ? prisma.payrollEmployee.groupBy({
           by: ['status'],
-          where: { periodId: period.id },
+          where: visiblePayrollWhere!,
           _count: { _all: true },
         })
       : Promise.resolve([]),
@@ -114,6 +137,8 @@ export async function getOverview(periodId?: string, trendMonths = 6) {
         year: true,
         month: true,
         status: true,
+        startDate: true,
+        endDate: true,
         payrollEmployees: {
           select: {
             grossIncome: true,
@@ -121,6 +146,7 @@ export async function getOverview(periodId?: string, trendMonths = 6) {
             otAmount: true,
             totalDeduction: true,
             isEstimate: true,
+            employee: { select: { startDate: true, endDate: true, reactivatedAt: true, status: true } },
           },
         },
       },

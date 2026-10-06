@@ -13,12 +13,14 @@ import { loadSettingsForDate, type PayrollSettings } from './settings.service.js
 import { rateForDate } from './daily-earnings.service.js';
 import { priceAbsenceDeduction, priceLateDeduction } from '../utils/deduction-pricing.js';
 import {
-  calculateRoundedWorkTime,
+  calculateDailyPayableTime,
+  floorToInterval,
   roundDownMinutes,
   roundingIntervalMinutes,
   workTimePolicy,
 } from '../utils/time-rounding.js';
 import { isUsableProfile } from './payroll-employee-context.service.js';
+import type { AttendanceSessionView } from './attendance-sessions.service.js';
 
 /**
  * What one attendance day was worth to one employee.
@@ -61,10 +63,15 @@ export interface DailyPay {
   lateChargedHours: number;
   /**
    * DAILY only. The unpaid break removed and the minutes actually paid for,
-   * so the cell can explain why 8h44m was paid as 7h30m. The record's own
+   * so the cell can explain why a long continuous day paid fewer minutes. The record's own
    * worked minutes stay the true observed duration.
    */
   breakDeductionMinutes: number;
+  actualWorkedMinutes: number;
+  requiredBreakMinutes: number;
+  sessionGapMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
   minutesBeforeRounding: number;
   roundedAwayMinutes: number;
   payableMinutes: number;
@@ -86,6 +93,11 @@ const ZERO: Omit<DailyPay, 'status' | 'note'> = {
   absenceDeduction: '0.00',
   lateChargedHours: 0,
   breakDeductionMinutes: 0,
+  actualWorkedMinutes: 0,
+  requiredBreakMinutes: 0,
+  sessionGapMinutes: 0,
+  creditedBreakMinutes: 0,
+  additionalBreakDeductionMinutes: 0,
   minutesBeforeRounding: 0,
   roundedAwayMinutes: 0,
   payableMinutes: 0,
@@ -114,6 +126,9 @@ export interface ValuationInput {
     /** Widened past AttendanceStatus: the list view substitutes the computed
      *  IN_PROGRESS for a day that is still open, and valuation must see it. */
     status: string;
+    sessions?: AttendanceSessionView[];
+    hasOpenSession?: boolean;
+    malformedSequence?: boolean;
   };
   employee: ValuationEmployee;
   profiles: EmployeePayProfile[];
@@ -142,7 +157,12 @@ export function valueAttendanceDay(input: ValuationInput): DailyPay {
 
   // One punch present and the other missing: the duration is unknown, so any
   // figure would be a guess. The Attendance page already flags the day.
-  if (record.status === 'MISSING_DATA' || record.status === 'IN_PROGRESS') {
+  if (
+    record.status === 'MISSING_DATA'
+    || record.status === 'IN_PROGRESS'
+    || record.hasOpenSession
+    || record.malformedSequence
+  ) {
     return notApplicable('ข้อมูลเวลายังไม่ครบ');
   }
 
@@ -193,7 +213,31 @@ function valueHourlyDay(
   // The same helper the payroll run uses, so this cell and the payslip can
   // never price the same day differently: a day over the threshold loses its
   // unpaid break, and the remainder is floored to the rounding increment.
-  const time = calculateRoundedWorkTime(input.record.workedMinutes, workTimePolicy(input.settings));
+  const policy = workTimePolicy(input.settings);
+  const breakdown = calculateDailyPayableTime({
+    sessions: input.record.sessions ?? [{
+      checkIn: null,
+      checkOut: null,
+      workedMinutes: input.record.workedMinutes,
+    }],
+    actualWorkedMinutes: input.record.workedMinutes,
+    roundingIntervalMinutes: policy.roundingMinutes,
+    thresholdMinutes: policy.breakThresholdMinutes,
+    requiredBreakMinutes: policy.breakDeductionMinutes,
+    allowGapCredit: !input.record.malformedSequence,
+  });
+  const hourlyPayable = floorToInterval(breakdown.actualWorkedMinutes, policy.roundingMinutes);
+  const time = input.employee.employmentType === EmploymentType.DAILY
+    ? breakdown
+    : {
+        ...breakdown,
+        requiredBreakMinutes: 0,
+        creditedBreakMinutes: 0,
+        additionalBreakDeductionMinutes: 0,
+        minutesBeforeRounding: breakdown.actualWorkedMinutes,
+        roundedAwayMinutes: breakdown.actualWorkedMinutes - hourlyPayable,
+        payableMinutes: hourlyPayable,
+      };
 
   // 450 payable minutes at 75 THB/h -> 450/60 x 75 = 562.50, on Decimal.
   const gross = money(dec(time.payableMinutes).dividedBy(60).times(rate));
@@ -209,7 +253,12 @@ function valueHourlyDay(
     leaveDeduction: '0.00',
     absenceDeduction: '0.00',
     lateChargedHours: 0,
-    breakDeductionMinutes: time.breakDeductionMinutes,
+    breakDeductionMinutes: time.additionalBreakDeductionMinutes,
+    actualWorkedMinutes: time.actualWorkedMinutes,
+    requiredBreakMinutes: time.requiredBreakMinutes,
+    sessionGapMinutes: time.interSessionGapMinutes,
+    creditedBreakMinutes: time.creditedBreakMinutes,
+    additionalBreakDeductionMinutes: time.additionalBreakDeductionMinutes,
     minutesBeforeRounding: time.minutesBeforeRounding,
     roundedAwayMinutes: time.roundedAwayMinutes,
     payableMinutes: time.payableMinutes,
@@ -298,6 +347,11 @@ function valueMonthlyDay(
     // Monthly staff are not paid by the hour; the daily break and the
     // 15-minute floor are DAILY rules and never apply here.
     breakDeductionMinutes: 0,
+    actualWorkedMinutes: 0,
+    requiredBreakMinutes: 0,
+    sessionGapMinutes: 0,
+    creditedBreakMinutes: 0,
+    additionalBreakDeductionMinutes: 0,
     minutesBeforeRounding: 0,
     roundedAwayMinutes: 0,
     payableMinutes: 0,

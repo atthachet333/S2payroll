@@ -7,10 +7,12 @@ import { Decimal, dec, money } from '../utils/money.js';
 import { formatDateOnly } from '../utils/datetime.js';
 import {
   DEFAULT_WORK_TIME_POLICY,
-  calculateRoundedWorkTime,
+  calculateDailyPayableTime,
+  floorToInterval,
   workTimePolicy,
   type WorkTimePolicy,
 } from '../utils/time-rounding.js';
+import { attachAttendanceSessions, type AttendanceSessionView } from './attendance-sessions.service.js';
 
 /**
  * Per-day earnings for staff paid by the hour (employmentType DAILY / HOURLY).
@@ -25,11 +27,11 @@ import {
  *  2. The rate is the one in force on that work date, not the rate in force
  *     today. A rise on 16 August must not reprice the first fortnight.
  *
- *  3. Money is priced from *payable* minutes, not from worked minutes: a day
- *     over eight hours loses an unpaid break, and what remains is floored to a
- *     15-minute increment. Both rules live in daily-payable-time.ts and are
- *     applied only here, so no caller can price a day a different way. The
- *     worked minutes themselves are reported untouched alongside.
+ *  3. Money is priced from *payable* minutes, not from worked minutes. For a
+ *     DAILY employee whose completed work exceeds four hours, positive gaps
+ *     between completed sessions credit the required break and only the
+ *     remaining break is deducted. The result is then floored to the company
+ *     interval. The worked minutes themselves remain untouched alongside.
  *
  * A day with no rate in force is reported with its worked minutes and a null
  * rate. It contributes no money and is counted as unrated, so the caller can
@@ -37,11 +39,15 @@ import {
  */
 
 export interface DailyEarningSource {
+  employeeCode?: string;
   workDate: Date;
   checkIn: Date | null;
   checkOut: Date | null;
   workedMinutes: number;
   status: string;
+  sessions?: AttendanceSessionView[];
+  hasOpenSession?: boolean;
+  malformedSequence?: boolean;
 }
 
 export interface DailyEarningRow {
@@ -50,7 +56,11 @@ export interface DailyEarningRow {
   checkOut: Date | null;
   /** The true observed duration. Never replaced by the payable figure. */
   workedMinutes: number;
-  /** Unpaid break removed because the day ran past the threshold. */
+  requiredBreakMinutes: number;
+  sessionGapMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
+  /** Backwards-compatible alias for additionalBreakDeductionMinutes. */
   breakDeductionMinutes: number;
   /** workedMinutes - break, before the floor. */
   minutesBeforeRounding: number;
@@ -63,6 +73,8 @@ export interface DailyEarningRow {
   /** payableMinutes / 60 x hourlyRate, or 0 when the day carries no rate. */
   amount: Decimal;
   rateConfigured: boolean;
+  finalized: boolean;
+  note: string | null;
   status: string;
 }
 
@@ -74,6 +86,10 @@ export interface DailyEarningsSummary {
   totalWorkedMinutes: number;
   /** Sum of the unpaid breaks removed across the period. */
   totalBreakDeductionMinutes: number;
+  totalRequiredBreakMinutes: number;
+  totalSessionGapMinutes: number;
+  totalCreditedBreakMinutes: number;
+  totalAdditionalBreakDeductionMinutes: number;
   /** Sum of the minutes actually paid for. */
   totalPayableMinutes: number;
   /** Sum of what the company floor discarded. */
@@ -83,6 +99,7 @@ export interface DailyEarningsSummary {
   /** Worked minutes with no rate in force. Money for these is not invented. */
   unratedMinutes: number;
   unratedDays: number;
+  unfinalizedDays: number;
   /** The period total, rounded once from the precise sum. */
   totalAmount: Decimal;
   /**
@@ -113,7 +130,8 @@ export function rateForDate(
 export function computeDailyEarnings(
   records: DailyEarningSource[],
   profiles: EmployeePayProfile[],
-  policy: WorkTimePolicy = DEFAULT_WORK_TIME_POLICY
+  policy: WorkTimePolicy = DEFAULT_WORK_TIME_POLICY,
+  employmentType: EmploymentType = EmploymentType.DAILY
 ): DailyEarningsSummary {
   const rows: DailyEarningRow[] = [];
   // Accumulated at full precision and rounded once at the end. Rounding each
@@ -123,12 +141,17 @@ export function computeDailyEarnings(
   let preciseTotal = new Decimal(0);
   let totalWorkedMinutes = 0;
   let totalBreakDeductionMinutes = 0;
+  let totalRequiredBreakMinutes = 0;
+  let totalSessionGapMinutes = 0;
+  let totalCreditedBreakMinutes = 0;
+  let totalAdditionalBreakDeductionMinutes = 0;
   let totalPayableMinutes = 0;
   let totalRoundedAwayMinutes = 0;
   let ratedMinutes = 0;
   let unratedMinutes = 0;
   let unratedDays = 0;
   let workedDays = 0;
+  let unfinalizedDays = 0;
 
   const ordered = [...records].sort((a, b) => a.workDate.getTime() - b.workDate.getTime());
 
@@ -136,14 +159,41 @@ export function computeDailyEarnings(
     const profile = rateForDate(profiles, record.workDate);
     const rate = profile ? dec(profile.hourlyRate) : null;
 
-    // The one place a daily duration becomes payable time. A day over the
-    // threshold loses its unpaid break, then the remainder is floored.
-    const time = calculateRoundedWorkTime(record.workedMinutes, policy);
+    const fallbackSessions = record.checkIn || record.checkOut
+      ? [{ checkIn: record.checkIn, checkOut: record.checkOut, workedMinutes: record.workedMinutes }]
+      : [];
+    const sessions = record.sessions ?? fallbackSessions;
+    const finalizable = !record.hasOpenSession
+      && !record.malformedSequence
+      && !['IN_PROGRESS', 'MISSING_DATA', 'MULTIPLE_EVENTS', 'INVALID'].includes(record.status);
+    const dailyTime = calculateDailyPayableTime({
+      sessions,
+      actualWorkedMinutes: record.workedMinutes,
+      roundingIntervalMinutes: policy.roundingMinutes,
+      thresholdMinutes: policy.breakThresholdMinutes,
+      requiredBreakMinutes: policy.breakDeductionMinutes,
+      allowGapCredit: !record.malformedSequence,
+    });
+    const hourlyPayable = floorToInterval(dailyTime.actualWorkedMinutes, policy.roundingMinutes);
+    const time = employmentType === EmploymentType.DAILY
+      ? dailyTime
+      : {
+          ...dailyTime,
+          requiredBreakMinutes: 0,
+          creditedBreakMinutes: 0,
+          additionalBreakDeductionMinutes: 0,
+          minutesBeforeRounding: dailyTime.actualWorkedMinutes,
+          roundedAwayMinutes: dailyTime.actualWorkedMinutes - hourlyPayable,
+          payableMinutes: hourlyPayable,
+        };
+    const payableMinutes = finalizable ? time.payableMinutes : 0;
 
     // 450 payable minutes at 75 THB/h -> 450/60 x 75 = 562.50. The division is
     // on Decimal, so 35 minutes at 93 THB/h is 54.25, not 54.249999999999996.
     const precise =
-      rate === null ? new Decimal(0) : dec(time.payableMinutes).dividedBy(60).times(rate);
+      rate === null || !finalizable
+        ? new Decimal(0)
+        : dec(payableMinutes).dividedBy(60).times(rate);
     // The row displays a rounded amount; the total is built from the precise one.
     const amount = money(precise);
 
@@ -151,27 +201,45 @@ export function computeDailyEarnings(
       workDate: formatDateOnly(record.workDate),
       checkIn: record.checkIn,
       checkOut: record.checkOut,
-      workedMinutes: time.actualMinutes,
-      breakDeductionMinutes: time.breakDeductionMinutes,
-      minutesBeforeRounding: time.minutesBeforeRounding,
-      roundedAwayMinutes: time.roundedAwayMinutes,
-      payableMinutes: time.payableMinutes,
+      workedMinutes: time.actualWorkedMinutes,
+      requiredBreakMinutes: finalizable ? time.requiredBreakMinutes : 0,
+      sessionGapMinutes: time.interSessionGapMinutes,
+      creditedBreakMinutes: finalizable ? time.creditedBreakMinutes : 0,
+      additionalBreakDeductionMinutes: finalizable ? time.additionalBreakDeductionMinutes : 0,
+      breakDeductionMinutes: finalizable ? time.additionalBreakDeductionMinutes : 0,
+      minutesBeforeRounding: finalizable ? time.minutesBeforeRounding : 0,
+      roundedAwayMinutes: finalizable ? time.roundedAwayMinutes : 0,
+      payableMinutes,
       hourlyRate: rate,
       amount,
       rateConfigured: rate !== null,
+      finalized: finalizable,
+      note: finalizable ? null : 'ข้อมูลรอบการทำงานยังไม่ครบ จึงยังไม่สรุปค่าจ้าง',
       status: record.status,
     });
 
-    totalWorkedMinutes += time.actualMinutes;
-    totalBreakDeductionMinutes += time.breakDeductionMinutes;
-    if (time.actualMinutes > 0) workedDays += 1;
-    if (rate === null) {
-      unratedMinutes += time.actualMinutes;
-      if (time.actualMinutes > 0) unratedDays += 1;
-    } else {
-      ratedMinutes += time.actualMinutes;
-      totalPayableMinutes += time.payableMinutes;
+    totalWorkedMinutes += time.actualWorkedMinutes;
+    totalSessionGapMinutes += time.interSessionGapMinutes;
+    if (finalizable) {
+      totalRequiredBreakMinutes += time.requiredBreakMinutes;
+      totalCreditedBreakMinutes += time.creditedBreakMinutes;
+      totalAdditionalBreakDeductionMinutes += time.additionalBreakDeductionMinutes;
+      totalBreakDeductionMinutes += time.additionalBreakDeductionMinutes;
+    } else if (time.actualWorkedMinutes > 0 || record.hasOpenSession || record.malformedSequence) {
+      unfinalizedDays += 1;
+    }
+    if (time.actualWorkedMinutes > 0) workedDays += 1;
+    // Payable-time derivation is independent of whether payroll has configured
+    // a rate. Keep the audit totals truthful even when money must remain unset.
+    if (finalizable) {
+      totalPayableMinutes += payableMinutes;
       totalRoundedAwayMinutes += time.roundedAwayMinutes;
+    }
+    if (rate === null) {
+      unratedMinutes += time.actualWorkedMinutes;
+      if (time.actualWorkedMinutes > 0) unratedDays += 1;
+    } else if (finalizable) {
+      ratedMinutes += time.actualWorkedMinutes;
       preciseTotal = preciseTotal.plus(precise);
     }
   }
@@ -181,11 +249,16 @@ export function computeDailyEarnings(
     workedDays,
     totalWorkedMinutes,
     totalBreakDeductionMinutes,
+    totalRequiredBreakMinutes,
+    totalSessionGapMinutes,
+    totalCreditedBreakMinutes,
+    totalAdditionalBreakDeductionMinutes,
     totalPayableMinutes,
     totalRoundedAwayMinutes,
     ratedMinutes,
     unratedMinutes,
     unratedDays,
+    unfinalizedDays,
     totalAmount: money(preciseTotal),
     preciseTotal,
   };
@@ -242,7 +315,13 @@ export async function employeeDailyEarnings(employeeId: string, year: number, mo
   }
 
   const settings = await loadSettingsForDate(end.toDate());
-  const summary = computeDailyEarnings(records, profiles, workTimePolicy(settings));
+  const sessionRecords = await attachAttendanceSessions(records);
+  const summary = computeDailyEarnings(
+    sessionRecords,
+    profiles,
+    workTimePolicy(settings),
+    employee.employmentType
+  );
   return {
     employeeId,
     employmentType: employee.employmentType,
@@ -258,11 +337,16 @@ export async function employeeDailyEarnings(employeeId: string, year: number, mo
       workedDays: summary.workedDays,
       totalWorkedMinutes: summary.totalWorkedMinutes,
       totalBreakDeductionMinutes: summary.totalBreakDeductionMinutes,
+      totalRequiredBreakMinutes: summary.totalRequiredBreakMinutes,
+      totalSessionGapMinutes: summary.totalSessionGapMinutes,
+      totalCreditedBreakMinutes: summary.totalCreditedBreakMinutes,
+      totalAdditionalBreakDeductionMinutes: summary.totalAdditionalBreakDeductionMinutes,
       totalPayableMinutes: summary.totalPayableMinutes,
       totalRoundedAwayMinutes: summary.totalRoundedAwayMinutes,
       ratedMinutes: summary.ratedMinutes,
       unratedMinutes: summary.unratedMinutes,
       unratedDays: summary.unratedDays,
+      unfinalizedDays: summary.unfinalizedDays,
       totalAmount: summary.totalAmount.toFixed(2),
     },
   };

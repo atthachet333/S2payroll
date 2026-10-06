@@ -122,6 +122,16 @@ describe('LeaveRequests preview mapping', () => {
     expect(row.errors.join(' ')).toContain('วันที่เริ่มลา');
   });
 
+  it('keeps valid rows usable when another row is invalid', () => {
+    const rows = extractLeaveRows(
+      [LEAVE_HEADERS, leaveRow(), leaveRow({ requestId: 'bad', startDate: 'คอลัมน์ 9', totalDays: 'คอลัมน์ 11', status: 'คอลัมน์ 14' })],
+      map
+    );
+    expect(rows.filter((row) => row.errors.length === 0)).toHaveLength(1);
+    expect(rows.filter((row) => row.errors.length > 0)).toHaveLength(1);
+    expect(rows[0].status).toBe('APPROVED');
+  });
+
   it('detects a duplicate requestId across the pull', () => {
     const rows = extractLeaveRows(
       [LEAVE_HEADERS, leaveRow(), leaveRow({ startDate: '2026-08-20', endDate: '2026-08-20' })],

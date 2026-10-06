@@ -9,6 +9,7 @@ import { notFound } from '../utils/errors.js';
 import { effectiveEmploymentStart, payrollEligibleEmployeeWhere } from './employee-payroll-eligibility.service.js';
 import { attendanceCloseMinutes, classifyOpenPunch } from '../utils/attendance-window.js';
 import { loadPeriodContext } from './payroll-employee-context.service.js';
+import { isUsablePayProfile, profileCoversDate } from './pay-profile-resolution.js';
 
 export type CheckSeverity = 'BLOCKING' | 'WARNING' | 'INFO';
 export interface CheckFinding { code: string; severity: CheckSeverity; title: string; detail: string; count: number; samples: string[] }
@@ -54,16 +55,8 @@ const SAMPLE_LIMIT = 10;
 // Re-exported from utils so existing importers keep working.
 export { attendanceCloseMinutes, classifyOpenPunch };
 
-function profileCovers(profile: EmployeePayProfile, date: Date) {
-  return profile.isActive && profile.effectiveFrom <= date && (profile.effectiveTo === null || profile.effectiveTo >= date);
-}
-
 function validProfile(profile: EmployeePayProfile | undefined, employmentType: EmploymentType) {
-  if (!profile) return false;
-  if (employmentType === 'MONTHLY' || employmentType === 'CONTRACT') {
-    return profile.payType === 'MONTHLY' && dec(profile.monthlySalary ?? 0).greaterThan(0);
-  }
-  return profile.payType === 'HOURLY' && dec(profile.hourlyRate ?? 0).greaterThan(0);
+  return profile ? isUsablePayProfile(profile, employmentType) : false;
 }
 
 export async function runPrePayrollChecks(periodId: string): Promise<PrePayrollReport> {
@@ -152,7 +145,7 @@ export async function runPrePayrollChecks(periodId: string): Promise<PrePayrollR
     const relevantDates = e.employmentType === 'MONTHLY' || e.employmentType === 'CONTRACT'
       ? expectedDates.get(e.id) ?? []
       : attendance.filter((r) => r.employeeId === e.id && r.checkIn && r.checkOut).map((r) => r.workDate);
-    const uncovered = relevantDates.filter((d) => !profiles.some((p) => profileCovers(p, d) && validProfile(p, e.employmentType)));
+    const uncovered = relevantDates.filter((d) => !profiles.some((p) => profileCoversDate(p, d) && validProfile(p, e.employmentType)));
     if (uncovered.length) missingCoverage.push({ id: e.id, daily: e.employmentType === 'DAILY', text: `${label(e)} — ${formatDateOnly(uncovered[0])} ถึง ${formatDateOnly(uncovered.at(-1)!)}` });
   }
   add({ code: 'MISSING_MONTHLY_SALARY', severity: 'WARNING', title: 'ยังไม่ได้กำหนดเงินเดือนรายเดือน', detail: 'กำหนดจำนวนเงินจริงและวันที่เริ่มใช้ ระบบจะไม่เดาจาก baseSalary เดิม', count: missingMonthly.length, samples: missingMonthly.map(label) });

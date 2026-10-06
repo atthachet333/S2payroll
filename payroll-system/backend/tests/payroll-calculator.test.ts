@@ -209,7 +209,7 @@ describe('calculatePayroll', () => {
     // gross - (sso + tax) must equal net exactly
     expect(
       result.grossIncome.minus(result.totalDeduction).toFixed(2)
-    ).toBe(result.netSalary.toFixed(2));
+    ).toBe(result.netPayBeforeRounding.toFixed(2));
   });
 
   it('pays weekday OT at 1.5x the hourly rate', () => {
@@ -332,7 +332,7 @@ describe('calculatePayroll', () => {
     expect(result.otherDeduction.toFixed(2)).toBe('150.00');
     expect(
       result.grossIncome.minus(result.totalDeduction).toFixed(2)
-    ).toBe(result.netSalary.toFixed(2));
+    ).toBe(result.netPayBeforeRounding.toFixed(2));
   });
 
   it('pays a DAILY employee only for the days actually present', () => {

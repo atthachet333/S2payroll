@@ -110,7 +110,7 @@ describe('a cycle runs Employees, then Attendance, then Leave', () => {
   });
 
   it('awaits each source, so attendance cannot start before employees finish', () => {
-    expect(service).toMatch(/const ok = await this\.runSource\(source\)/);
+    expect(service).toMatch(/const sourceStatus = await this\.runSource\(source\)/);
   });
 });
 
@@ -152,7 +152,7 @@ describe('a failing source cannot crash the backend', () => {
     );
     expect(runSource).toContain('try {');
     expect(runSource).toContain('} catch (error) {');
-    expect(runSource).toContain('return false;');
+    expect(runSource).toContain("return 'FAILED';");
     expect(runSource).not.toContain('throw');
   });
 

@@ -14,6 +14,7 @@ import { badRequest, codedConflict, notFound } from '../utils/errors.js';
 import { getDayType, isScheduledWorkday } from './schedule-policy.service.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
+import { attachLeaveTypes } from './leave-display.service.js';
 
 export interface AttendanceMetrics {
   workedMinutes: number;
@@ -370,7 +371,7 @@ export async function listAttendance(params: AttendanceListParams) {
   const clock = companyClock();
   const todaySettings = await loadSettingsForDate(new Date(`${clock.date}T00:00:00.000Z`));
   const closeMinutes = monthlyEndMinutes(todaySettings) + Math.max(0, todaySettings.number('ATTENDANCE_CLOSE_GRACE_MINUTES'));
-  const effectiveItems = await attachAttendanceSessions(items.map((item) => ({
+  const sessionItems = await attachAttendanceSessions(items.map((item) => ({
     ...item,
     status:
       item.status === 'MISSING_DATA' && item.checkIn && !item.checkOut &&
@@ -378,6 +379,7 @@ export async function listAttendance(params: AttendanceListParams) {
         ? 'IN_PROGRESS' as const
         : item.status,
   })));
+  const effectiveItems = await attachLeaveTypes(sessionItems);
 
   // What each day was worth, valued on the server. The table never derives
   // money itself - one formula, owned by the backend, keeps the Attendance
@@ -393,6 +395,9 @@ export async function listAttendance(params: AttendanceListParams) {
       isHoliday: item.isHoliday,
       isWeekend: item.isWeekend,
       status: item.status,
+      sessions: item.sessions,
+      hasOpenSession: item.hasOpenSession,
+      malformedSequence: item.malformedSequence,
     })),
     new Map(
       effectiveItems.map((item) => [
@@ -440,8 +445,9 @@ export async function getAttendanceById(id: string) {
   );
 
   const [withSessions] = await attachAttendanceSessions([record]);
+  const [withLeaveType] = await attachLeaveTypes([withSessions]);
   return {
-    ...withSessions,
+    ...withLeaveType,
     adjustments: record.adjustments.map((a) => ({
       ...a,
       changedByName: editorById.get(a.changedBy) ?? null,
@@ -1106,22 +1112,63 @@ export async function getWorkCalendar(year: number, month: number) {
  * the new rules without re-syncing the sheet.
  */
 export async function recalculateRange(from: Date, to: Date, employeeId?: string) {
-  const locked = await prisma.attendanceRecord.count({
-    where: { workDate: { gte: toUtcDateOnly(from), lte: toUtcDateOnly(to) }, isLocked: true, employee: { attendanceRequired: true }, ...(employeeId ? { employeeId } : {}) },
-  });
-  const records = await prisma.attendanceRecord.findMany({
-    where: { workDate: { gte: toUtcDateOnly(from), lte: toUtcDateOnly(to) }, isLocked: false, employee: { attendanceRequired: true }, ...(employeeId ? { employeeId } : {}) },
-    include: { employee: { select: { otEligible: true, employmentType: true } } },
-  });
+  const [locked, candidateRecords, finalisedPeriods] = await Promise.all([
+    prisma.attendanceRecord.count({
+      where: { workDate: { gte: toUtcDateOnly(from), lte: toUtcDateOnly(to) }, isLocked: true, employee: { attendanceRequired: true }, ...(employeeId ? { employeeId } : {}) },
+    }),
+    prisma.attendanceRecord.findMany({
+      where: { workDate: { gte: toUtcDateOnly(from), lte: toUtcDateOnly(to) }, isLocked: false, employee: { attendanceRequired: true }, ...(employeeId ? { employeeId } : {}) },
+      include: { employee: { select: { otEligible: true, employmentType: true } } },
+    }),
+    prisma.payrollPeriod.findMany({
+      where: {
+        status: { in: ['APPROVED', 'PAID', 'LOCKED'] },
+        startDate: { lte: toUtcDateOnly(to) },
+        endDate: { gte: toUtcDateOnly(from) },
+      },
+      select: { startDate: true, endDate: true },
+    }),
+  ]);
+  const records = candidateRecords.filter(
+    (record) => !finalisedPeriods.some((period) => period.startDate <= record.workDate && period.endDate >= record.workDate)
+  );
+  const skippedFinalised = candidateRecords.length - records.length;
 
   const leaves = await prisma.leaveRecord.findMany({
     where: { status: 'APPROVED', startDate: { lte: to }, endDate: { gte: from }, employee: { leaveTrackingRequired: true } },
   });
+  const holidayFrom = leaves.reduce((earliest, leave) => leave.startDate < earliest ? leave.startDate : earliest, toUtcDateOnly(from));
+  const holidayTo = leaves.reduce((latest, leave) => leave.endDate > latest ? leave.endDate : latest, toUtcDateOnly(to));
+  const holidays = await prisma.holiday.findMany({
+    where: { date: { gte: holidayFrom, lte: holidayTo } },
+    select: { date: true },
+  });
+
+  const holidaySet = new Set(holidays.map((holiday) => dayjs.utc(holiday.date).format('YYYY-MM-DD')));
+  const leaveDateKeys = new Set<string>();
+  for (const leave of leaves) {
+    const authoritativeDays = Number(leave.totalDays);
+    // Fractional leave cannot safely be represented as a full-day attendance
+    // state without duration data from the source system.
+    if (!Number.isInteger(authoritativeDays) || authoritativeDays <= 0) continue;
+    const coveredDates: string[] = [];
+    for (
+      let cursor = dayjs.utc(leave.startDate);
+      !cursor.isAfter(dayjs.utc(leave.endDate), 'day') && coveredDates.length < authoritativeDays;
+      cursor = cursor.add(1, 'day')
+    ) {
+      const candidate = cursor.startOf('day').toDate();
+      const settings = await loadSettingsForDate(candidate);
+      const dateKey = cursor.format('YYYY-MM-DD');
+      if (!holidaySet.has(dateKey) && isScheduledWorkday(candidate, settings)) {
+        coveredDates.push(dateKey);
+      }
+    }
+    for (const dateKey of coveredDates) leaveDateKeys.add(`${leave.employeeId}:${dateKey}`);
+  }
 
   const onLeave = (employeeId: string, date: Date): boolean =>
-    leaves.some(
-      (l) => l.employeeId === employeeId && l.startDate <= date && l.endDate >= date
-    );
+    leaveDateKeys.has(`${employeeId}:${dayjs.utc(date).format('YYYY-MM-DD')}`);
 
   let updated = 0;
   for (const record of records) {
@@ -1160,7 +1207,7 @@ export async function recalculateRange(from: Date, to: Date, employeeId?: string
     });
     updated += 1;
   }
-  return { updated, skippedLocked: locked };
+  return { updated, skippedLocked: locked + skippedFinalised };
 }
 
 // ---------------------------------------------------------------------------

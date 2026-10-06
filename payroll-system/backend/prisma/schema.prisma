@@ -688,10 +688,14 @@ model PayrollEmployee {
   /// Unpaid leave days inside the period, kept apart from absentDays because
   /// leave and absence are priced by two different employee policies.
   unpaidLeaveDays Decimal @default(0) @map("unpaid_leave_days") @db.Decimal(6, 2)
-  /// DAILY only. The unpaid break removed for days past the eight-hour
-  /// threshold, and the minutes actually paid for after the 15-minute floor.
+  /// DAILY only. Per-day break credit and the extra break actually deducted.
   /// workingHours stays the true observed duration; these are derived for money
-  /// and exist so a payslip can explain why 8h44m was paid as 7h30m.
+  /// and exist so payroll can explain the result without touching punches.
+  sessionGapMinutes                Int @default(0) @map("session_gap_minutes")
+  requiredBreakMinutes             Int @default(0) @map("required_break_minutes")
+  creditedBreakMinutes             Int @default(0) @map("credited_break_minutes")
+  additionalBreakDeductionMinutes  Int @default(0) @map("additional_break_deduction_minutes")
+  /// Backwards-compatible total; equals additionalBreakDeductionMinutes.
   breakDeductionMinutes Int @default(0) @map("break_deduction_minutes")
   payableMinutes        Int @default(0) @map("payable_minutes")
   /// What the company rounding interval discarded from the period, and the
@@ -720,6 +724,11 @@ model PayrollEmployee {
   otherDeduction     Decimal @default(0) @map("other_deduction") @db.Decimal(15, 2)
   totalDeduction     Decimal @default(0) @map("total_deduction") @db.Decimal(15, 2)
 
+  /// Exact net after all cent-precision components, before final whole-baht rounding.
+  /// Nullable only for immutable legacy rows created before this policy existed.
+  netSalaryBeforeRounding Decimal? @map("net_salary_before_rounding") @db.Decimal(15, 2)
+  roundingAdjustment     Decimal? @map("rounding_adjustment") @db.Decimal(15, 2)
+  /// Authoritative whole-baht amount to pay. Legacy database name retained.
   netSalary Decimal @default(0) @map("net_salary") @db.Decimal(15, 2)
 
   status        PayrollEmployeeStatus @default(NEEDS_REVIEW)

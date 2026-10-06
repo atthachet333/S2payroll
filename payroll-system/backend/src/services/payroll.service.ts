@@ -10,11 +10,16 @@ import { loadSettings, loadSettingsForDate, settingsFromSnapshot, type SettingsM
 import { calculatePayroll, type AttendanceAggregate, type ManualItem } from './payroll-calculator.service.js';
 import { recordAudit } from './audit.service.js';
 import { runPrePayrollChecks } from './pre-payroll-check.service.js';
-import { dec, toPrismaDecimal, toPrismaHours, money, Decimal } from '../utils/money.js';
+import { dec, finalPay, toPrismaDecimal, toPrismaHours, money, Decimal } from '../utils/money.js';
 import { companyClock, cycleBounds, dayjs, eachDay, formatDateOnly, thaiMonthLabel } from '../utils/datetime.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { isScheduledWorkday } from './schedule-policy.service.js';
-import { payrollEligibleEmployeeWhere } from './employee-payroll-eligibility.service.js';
+import {
+  payrollEligibleEmployeeWhere,
+  payrollEmployeeVisibilityWhere,
+  shouldApplyEmploymentOverlapToPayrollRows,
+  visiblePayrollRowsForPeriod,
+} from './employee-payroll-eligibility.service.js';
 import { latestProfile, loadPeriodContext } from './payroll-employee-context.service.js';
 import { NON_FINAL_STATUSES } from '../utils/payroll-readiness.js';
 import { attendanceCloseMinutes, classifyOpenPunch } from '../utils/attendance-window.js';
@@ -132,7 +137,34 @@ export async function getPeriodSuggestion(year: number, month: number) {
 }
 
 export async function listPeriods() {
-  return prisma.payrollPeriod.findMany({ orderBy: [{ year: 'desc' }, { month: 'desc' }] });
+  const periods = await prisma.payrollPeriod.findMany({
+    orderBy: [{ year: 'desc' }, { month: 'desc' }],
+    include: {
+      payrollEmployees: {
+        select: {
+          grossIncome: true,
+          otAmount: true,
+          totalDeduction: true,
+          netSalary: true,
+          employee: { select: { startDate: true, endDate: true, reactivatedAt: true, status: true } },
+        },
+      },
+    },
+  });
+  return periods.map(({ payrollEmployees, ...period }) => {
+    if (!shouldApplyEmploymentOverlapToPayrollRows(period)) return period;
+    const visibleRows = visiblePayrollRowsForPeriod(payrollEmployees, period);
+    const sum = (field: 'grossIncome' | 'otAmount' | 'totalDeduction' | 'netSalary') =>
+      visibleRows.reduce((total, row) => total.plus(dec(row[field])), dec(0));
+    return {
+      ...period,
+      totalEmployees: visibleRows.length,
+      grossTotal: toPrismaDecimal(sum('grossIncome')),
+      otTotal: toPrismaDecimal(sum('otAmount')),
+      deductionTotal: toPrismaDecimal(sum('totalDeduction')),
+      netTotal: toPrismaDecimal(sum('netSalary')),
+    };
+  });
 }
 
 export async function getPeriod(id: string) {
@@ -345,9 +377,12 @@ export async function aggregateAttendance(
     const agg = result.get(leave.employeeId) ?? blank();
     const from = leave.startDate < period.startDate ? period.startDate : leave.startDate;
     const to = leave.endDate > period.endDate ? period.endDate : leave.endDate;
-    const days = eachDay(from, to).filter(
+    const scheduledDays = eachDay(from, to).filter(
       (d) => isScheduledWorkday(d, scheduleSettings) && !holidayKeys.has(dayjs.utc(d).format('YYYY-MM-DD'))
     ).length;
+    const days = leave.startDate >= period.startDate && leave.endDate <= period.endDate
+      ? Math.min(scheduledDays, Number(leave.totalDays))
+      : scheduledDays;
     agg.leaveDays += days;
     if (!leave.isPaid) agg.unpaidLeaveDays += days;
     result.set(leave.employeeId, agg);
@@ -521,6 +556,11 @@ export async function calculatePeriod(
               amount: earnings.totalAmount,
               totalWorkedMinutes: earnings.totalWorkedMinutes,
               totalBreakDeductionMinutes: earnings.totalBreakDeductionMinutes,
+              totalSessionGapMinutes: earnings.totalSessionGapMinutes,
+              totalRequiredBreakMinutes: earnings.totalRequiredBreakMinutes,
+              totalCreditedBreakMinutes: earnings.totalCreditedBreakMinutes,
+              totalAdditionalBreakDeductionMinutes:
+                earnings.totalAdditionalBreakDeductionMinutes,
               totalPayableMinutes: earnings.totalPayableMinutes,
               totalRoundedAwayMinutes: earnings.totalRoundedAwayMinutes,
               ratedMinutes: earnings.ratedMinutes,
@@ -573,6 +613,10 @@ export async function calculatePeriod(
       // Derived for money only. workingHours above stays the true observed
       // duration, so the row records both what happened and what was paid.
       breakDeductionMinutes: result.breakDeductionMinutes,
+      sessionGapMinutes: result.sessionGapMinutes,
+      requiredBreakMinutes: result.requiredBreakMinutes,
+      creditedBreakMinutes: result.creditedBreakMinutes,
+      additionalBreakDeductionMinutes: result.additionalBreakDeductionMinutes,
       payableMinutes: result.payableMinutes,
       roundedAwayMinutes: result.roundedAwayMinutes,
       roundedLateMinutes: result.roundedLateMinutes,
@@ -598,7 +642,9 @@ export async function calculatePeriod(
       otherDeduction: toPrismaDecimal(result.otherDeduction),
       totalDeduction: toPrismaDecimal(result.totalDeduction),
 
-      netSalary: toPrismaDecimal(result.netSalary),
+      netSalaryBeforeRounding: toPrismaDecimal(result.netPayBeforeRounding),
+      roundingAdjustment: toPrismaDecimal(result.roundingAdjustment),
+      netSalary: toPrismaDecimal(result.payableNet),
       status: result.status,
       payConfigured: result.payConfigured,
       isEstimate: result.isEstimate,
@@ -655,7 +701,7 @@ export async function calculatePeriod(
     grossTotal = grossTotal.plus(result.grossIncome);
     otTotal = otTotal.plus(result.otAmount);
     deductionTotal = deductionTotal.plus(result.totalDeduction);
-    netTotal = netTotal.plus(result.netSalary);
+    netTotal = netTotal.plus(result.payableNet);
   }
 
   // Drop rows for employees that no longer belong in this period - deactivated
@@ -887,12 +933,24 @@ export async function unlockPeriod(periodId: string, reason: string, actor: Acto
 
 export async function listPeriodEmployees(
   periodId: string,
-  params: { page: number; pageSize: number; search?: string; departmentId?: string; status?: PayrollEmployeeStatus }
+  params: {
+    page: number;
+    pageSize: number;
+    search?: string;
+    departmentId?: string;
+    status?: PayrollEmployeeStatus;
+    includeInactive?: boolean;
+  }
 ) {
+  const period = await getPeriod(periodId);
   const where: Prisma.PayrollEmployeeWhereInput = {
     periodId,
+    ...payrollEmployeeVisibilityWhere(
+      period,
+      params.departmentId ? { departmentId: params.departmentId } : undefined,
+      { includeInactive: params.includeInactive }
+    ),
     ...(params.status ? { status: params.status } : {}),
-    ...(params.departmentId ? { employee: { departmentId: params.departmentId } } : {}),
     ...(params.search
       ? {
           OR: [
@@ -903,9 +961,10 @@ export async function listPeriodEmployees(
       : {}),
   };
 
-  const [items, total] = await Promise.all([
+  const [rows, total] = await Promise.all([
     prisma.payrollEmployee.findMany({
       where,
+      include: { employee: { select: { status: true } } },
       orderBy: { employeeCode: 'asc' },
       skip: (params.page - 1) * params.pageSize,
       take: params.pageSize,
@@ -913,6 +972,7 @@ export async function listPeriodEmployees(
     prisma.payrollEmployee.count({ where }),
   ]);
 
+  const items = rows.map(({ employee, ...row }) => ({ ...row, employeeStatus: employee.status }));
   return { items, total, page: params.page, pageSize: params.pageSize };
 }
 
@@ -935,11 +995,18 @@ export async function getPeriodEmployee(periodId: string, employeeId: string) {
 }
 
 /** Summary cards for the payroll page. */
-export async function periodSummary(periodId: string) {
+export async function periodSummary(
+  periodId: string,
+  options: { includeInactive?: boolean } = {}
+) {
   const period = await getPeriod(periodId);
+  const visibleWhere: Prisma.PayrollEmployeeWhereInput = {
+    periodId,
+    ...payrollEmployeeVisibilityWhere(period, undefined, options),
+  };
   const grouped = await prisma.payrollEmployee.groupBy({
     by: ['status'],
-    where: { periodId },
+    where: visibleWhere,
     _count: { _all: true },
   });
 
@@ -955,7 +1022,7 @@ export async function periodSummary(periodId: string) {
   for (const row of grouped) statusCounts[row.status] = row._count._all;
 
   const totals = await prisma.payrollEmployee.aggregate({
-    where: { periodId },
+    where: visibleWhere,
     _sum: {
       grossIncome: true,
       otAmount: true,
@@ -1109,7 +1176,9 @@ export async function adjustPayrollEmployee(
       .plus(next.loanDeduction)
       .plus(next.otherDeduction)
   );
-  const netSalary = money(grossIncome.minus(totalDeduction));
+  const { netPayBeforeRounding, roundingAdjustment, payableNet } = finalPay(
+    grossIncome.minus(totalDeduction)
+  );
 
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.payrollEmployee.update({
@@ -1129,7 +1198,9 @@ export async function adjustPayrollEmployee(
         tax: toPrismaDecimal(next.tax),
         grossIncome: toPrismaDecimal(grossIncome),
         totalDeduction: toPrismaDecimal(totalDeduction),
-        netSalary: toPrismaDecimal(netSalary),
+        netSalaryBeforeRounding: toPrismaDecimal(netPayBeforeRounding),
+        roundingAdjustment: toPrismaDecimal(roundingAdjustment),
+        netSalary: toPrismaDecimal(payableNet),
         hasAdjustment: true,
         // A human has now put a figure on this row, so it is no longer raw
         // incomplete data - but it is still not a settled amount.
@@ -1239,8 +1310,9 @@ export async function setPayrollEmployeeStatus(
 
 /** Recompute the period-level totals from the employee rows. */
 export async function refreshPeriodTotals(periodId: string) {
+  const period = await getPeriod(periodId);
   const totals = await prisma.payrollEmployee.aggregate({
-    where: { periodId },
+    where: { periodId, ...payrollEmployeeVisibilityWhere(period) },
     _sum: { grossIncome: true, otAmount: true, totalDeduction: true, netSalary: true },
     _count: { _all: true },
   });

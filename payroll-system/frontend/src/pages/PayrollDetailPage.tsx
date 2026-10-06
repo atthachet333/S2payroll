@@ -22,6 +22,7 @@ import PrePayrollCheckDialog from '@/features/payroll/PrePayrollCheckDialog';
 import PayrollCharts from '@/features/payroll/PayrollCharts';
 import {
   Button,
+  Badge,
   Card,
   ConfirmDialog,
   EmptyState,
@@ -192,6 +193,7 @@ export default function PayrollDetailPage() {
   const [search, setSearch] = React.useState('');
   const [departmentId, setDepartmentId] = React.useState('');
   const [status, setStatus] = React.useState('');
+  const [showInactive, setShowInactive] = React.useState(false);
   /** Employee-code filter from the dropdown; takes precedence over free-text search. */
   const [employeeFilter, setEmployeeFilter] = React.useState('');
   const [selectedEmployee, setSelectedEmployee] = React.useState<string | null>(null);
@@ -214,7 +216,7 @@ export default function PayrollDetailPage() {
     }
   }, [periodId]);
 
-  React.useEffect(() => setPage(1), [search, departmentId, status, employeeFilter]);
+  React.useEffect(() => setPage(1), [search, departmentId, status, employeeFilter, showInactive]);
 
   const { data: departments = [] } = useQuery({
     queryKey: ['departments'],
@@ -222,8 +224,8 @@ export default function PayrollDetailPage() {
   });
 
   const periodQuery = useQuery({
-    queryKey: ['payroll-period', periodId],
-    queryFn: () => payrollApi.getPeriod(periodId),
+    queryKey: ['payroll-period', periodId, showInactive],
+    queryFn: () => payrollApi.getPeriod(periodId, showInactive),
     enabled: Boolean(periodId),
   });
   const readinessQuery = useQuery({
@@ -239,8 +241,12 @@ export default function PayrollDetailPage() {
   // search box is used instead, rather than silently offering a partial list.
   const ROSTER_LIMIT = 200;
   const rosterQuery = useQuery({
-    queryKey: ['payroll-roster', periodId],
-    queryFn: () => payrollApi.listEmployees(periodId, { page: 1, pageSize: ROSTER_LIMIT }),
+    queryKey: ['payroll-roster', periodId, showInactive],
+    queryFn: () => payrollApi.listEmployees(periodId, {
+      page: 1,
+      pageSize: ROSTER_LIMIT,
+      includeInactive: showInactive,
+    }),
     enabled: Boolean(periodId),
   });
   const periodEmployees = rosterQuery.data?.items ?? [];
@@ -250,7 +256,7 @@ export default function PayrollDetailPage() {
   const effectiveSearch = employeeFilter || search || undefined;
 
   const employeesQuery = useQuery({
-    queryKey: ['payroll-employees', periodId, page, effectiveSearch, departmentId, status],
+    queryKey: ['payroll-employees', periodId, page, effectiveSearch, departmentId, status, showInactive],
     queryFn: () =>
       payrollApi.listEmployees(periodId, {
         page,
@@ -258,6 +264,7 @@ export default function PayrollDetailPage() {
         search: effectiveSearch,
         departmentId: departmentId || undefined,
         status: status || undefined,
+        includeInactive: showInactive,
       }),
     enabled: Boolean(periodId),
   });
@@ -360,6 +367,7 @@ export default function PayrollDetailPage() {
   const summary = periodQuery.data;
   const period = summary.period;
   const locked = period.status === 'LOCKED';
+  const currentVisibilityPeriod = ['DRAFT', 'ATTENDANCE_REVIEW', 'CALCULATED', 'REVIEW'].includes(period.status);
 
   const availableActions = ACTIONS.filter(
     (action) => action.availableIn.includes(period.status) && can(action.permission) &&
@@ -514,6 +522,16 @@ export default function PayrollDetailPage() {
             </Select>
           </Field>
         </div>
+        {currentVisibilityPeriod && (
+          <label className="mt-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showInactive}
+              onChange={(event) => setShowInactive(event.target.checked)}
+            />
+            <span>แสดงพนักงานที่ไม่ทำงานแล้ว</span>
+          </label>
+        )}
       </Card>
 
       {/* Employee payroll table */}
@@ -548,15 +566,19 @@ export default function PayrollDetailPage() {
                     <th className="text-right">หักขาด</th>
                     <th className="text-right">ประกันสังคม</th>
                     <th className="text-right">ภาษี</th>
-                    <th className="text-right">รับสุทธิ</th>
+                    <th className="text-right">ยอดก่อนปัด</th>
+                    <th className="text-right">ปรับเศษ</th>
+                    <th className="text-right">ยอดจ่ายจริง</th>
                     <th>สถานะ</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {employeesQuery.data?.items.map((row) => (
+                  {employeesQuery.data?.items.map((row) => {
+                    const inactive = row.employeeStatus === 'INACTIVE' || row.employeeStatus === 'TERMINATED';
+                    return (
                     <tr
                       key={row.id}
-                      className="cursor-pointer"
+                      className={cn('cursor-pointer', showInactive && inactive && 'bg-muted/40 text-muted-foreground')}
                       onClick={() => setSelectedEmployee(row.employeeId)}
                     >
                       <td className="font-medium">{row.employeeCode}</td>
@@ -582,14 +604,26 @@ export default function PayrollDetailPage() {
                       <td className="num text-danger">{formatMoney(row.absenceDeduction)}</td>
                       <td className="num text-danger">{formatMoney(row.socialSecurity)}</td>
                       <td className="num text-danger">{formatMoney(row.tax)}</td>
+                      <td className={cn('num', !row.payConfigured && 'text-warning')}>
+                        {row.payConfigured ? formatMoney(row.netSalaryBeforeRounding ?? row.netSalary) : '—'}
+                      </td>
+                      <td className="num text-muted-foreground">
+                        {row.payConfigured && row.roundingAdjustment != null
+                          ? `${Number(row.roundingAdjustment) > 0 ? '+' : ''}${formatMoney(row.roundingAdjustment)}`
+                          : '—'}
+                      </td>
                       <td className={cn('num font-semibold', !row.payConfigured && 'text-warning')}>
-                        {row.payConfigured ? formatMoney(row.netSalary) : '—'}
+                        {row.payConfigured ? formatMoney(row.netSalary, 0) : '—'}
                       </td>
                       <td>
-                        <PayrollEmployeeStatusBadge status={row.status} />
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <PayrollEmployeeStatusBadge status={row.status} />
+                          {showInactive && inactive && <Badge variant="secondary">ไม่ทำงานแล้ว</Badge>}
+                        </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

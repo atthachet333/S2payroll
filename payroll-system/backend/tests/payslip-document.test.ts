@@ -93,7 +93,7 @@ const dailySnapshot = () =>
       dailyBase: '600.00',
       hourlyBase: '75.00',
       workedMinutes: 4715,
-      // 12 days over eight hours would each lose an hour; this fixture keeps
+      // 12 DAILY days over four hours would each require an hour; this fixture keeps
       // the arithmetic simple and states the paid figure explicitly.
       breakDeductionMinutes: 0,
       payableMinutes: 4710,
@@ -245,7 +245,7 @@ describe('the document is honest about how each employee is paid', () => {
   it('shows a rate and worked time for hourly staff, not a monthly salary', () => {
     const fn = pdf.slice(pdf.indexOf('function drawPayBasis'), pdf.indexOf('function baseAmount'));
     expect(fn).toContain('อัตราค่าจ้าง');
-    // Actual and paid hours are two separate figures: a day past eight hours
+    // Actual and paid hours are two separate figures: a DAILY day past four hours
     // loses an unpaid break and is floored, so printing one as the other would
     // misstate what the employee worked.
     expect(fn).toContain('ชั่วโมงทำงานจริง');

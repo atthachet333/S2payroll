@@ -45,6 +45,34 @@ export interface RoundedWorkTime {
   payableMinutes: number;
 }
 
+export interface DailyPayableSession {
+  checkIn: Date | null;
+  checkOut: Date | null;
+  workedMinutes: number;
+}
+
+export interface DailyPayableTime {
+  actualWorkedMinutes: number;
+  requiredBreakMinutes: number;
+  interSessionGapMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
+  minutesBeforeRounding: number;
+  roundedAwayMinutes: number;
+  payableMinutes: number;
+}
+
+export interface DailyPayableTimeInput {
+  sessions: readonly DailyPayableSession[];
+  /** Legacy/manual rows without event sessions retain their already-derived duration. */
+  actualWorkedMinutes?: number;
+  roundingIntervalMinutes: number;
+  thresholdMinutes?: number;
+  requiredBreakMinutes?: number;
+  /** Malformed event sequences may show completed time but never invent gap credit. */
+  allowGapCredit?: boolean;
+}
+
 export interface WorkTimePolicy {
   /** Company-wide floor interval. TIME_ROUNDING_MINUTES. */
   roundingMinutes: number;
@@ -58,7 +86,7 @@ export const DEFAULT_ROUNDING_MINUTES = 15;
 
 export const DEFAULT_WORK_TIME_POLICY: WorkTimePolicy = {
   roundingMinutes: DEFAULT_ROUNDING_MINUTES,
-  breakThresholdMinutes: 480,
+  breakThresholdMinutes: 240,
   breakDeductionMinutes: 60,
 };
 
@@ -125,6 +153,68 @@ export function calculateRoundedWorkTime(
 }
 
 /**
+ * Canonical DAILY payable-time calculation.
+ *
+ * Completed session durations are already net of time between sessions. Those
+ * positive chronological gaps are therefore credit toward the required break,
+ * never something to subtract from worked time a second time.
+ */
+export function calculateDailyPayableTime(input: DailyPayableTimeInput): DailyPayableTime {
+  const completed = input.sessions
+    .filter((session) => session.checkIn && session.checkOut && session.workedMinutes > 0)
+    .map((session) => ({
+      ...session,
+      workedMinutes: Math.floor(session.workedMinutes),
+      checkIn: session.checkIn!,
+      checkOut: session.checkOut!,
+    }))
+    .sort((a, b) => a.checkIn.getTime() - b.checkIn.getTime());
+
+  const sessionWorkedMinutes = completed.reduce((sum, session) => sum + session.workedMinutes, 0);
+  const fallbackWorkedMinutes = Number.isFinite(input.actualWorkedMinutes)
+    ? Math.max(0, Math.floor(input.actualWorkedMinutes ?? 0))
+    : 0;
+  const actualWorkedMinutes = completed.length > 0 ? sessionWorkedMinutes : fallbackWorkedMinutes;
+
+  let interSessionGapMinutes = 0;
+  if (input.allowGapCredit !== false) {
+    for (let index = 1; index < completed.length; index += 1) {
+      const previousCheckout = completed[index - 1].checkOut.getTime();
+      const nextCheckIn = completed[index].checkIn.getTime();
+      const gap = Math.floor((nextCheckIn - previousCheckout) / 60_000);
+      if (gap > 0) interSessionGapMinutes += gap;
+    }
+  }
+
+  const thresholdMinutes = Math.max(0, Math.floor(input.thresholdMinutes ?? 240));
+  const configuredRequiredBreak = Math.max(0, Math.floor(input.requiredBreakMinutes ?? 60));
+  const requiredBreakMinutes = actualWorkedMinutes > thresholdMinutes
+    ? configuredRequiredBreak
+    : 0;
+  const creditedBreakMinutes = Math.min(requiredBreakMinutes, interSessionGapMinutes);
+  const additionalBreakDeductionMinutes = Math.max(
+    0,
+    requiredBreakMinutes - creditedBreakMinutes
+  );
+  const minutesBeforeRounding = Math.max(
+    0,
+    actualWorkedMinutes - additionalBreakDeductionMinutes
+  );
+  const payableMinutes = floorToInterval(minutesBeforeRounding, input.roundingIntervalMinutes);
+
+  return {
+    actualWorkedMinutes,
+    requiredBreakMinutes,
+    interSessionGapMinutes,
+    creditedBreakMinutes,
+    additionalBreakDeductionMinutes,
+    minutesBeforeRounding,
+    roundedAwayMinutes: minutesBeforeRounding - payableMinutes,
+    payableMinutes,
+  };
+}
+
+/**
  * The company-wide interval.
  *
  * TIME_ROUNDING_MINUTES is the single authority. DAILY_PAY_ROUNDING_MINUTES is
@@ -150,7 +240,7 @@ export function workTimePolicy(settings: PayrollSettings): WorkTimePolicy {
       DEFAULT_WORK_TIME_POLICY.breakThresholdMinutes
     ),
     breakDeductionMinutes: read(
-      'DAILY_BREAK_DEDUCTION_MINUTES',
+      'DAILY_REQUIRED_BREAK_MINUTES',
       DEFAULT_WORK_TIME_POLICY.breakDeductionMinutes
     ),
   };

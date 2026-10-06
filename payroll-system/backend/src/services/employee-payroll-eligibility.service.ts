@@ -1,4 +1,4 @@
-import { EmployeeStatus, type Employee, type PayrollPeriod, type Prisma } from '@prisma/client';
+import type { Employee, PayrollPeriod, Prisma } from '@prisma/client';
 
 /**
  * The date an employee's *current* spell of employment began.
@@ -18,9 +18,6 @@ export function effectiveEmploymentStart(
   return employee.startDate;
 }
 
-/** Statuses that mean the person is on the payroll right now. */
-const WORKING_STATUSES: EmployeeStatus[] = [EmployeeStatus.ACTIVE, EmployeeStatus.PROBATION];
-
 /**
  * Whether an employee participates in a payroll period.
  *
@@ -31,15 +28,11 @@ const WORKING_STATUSES: EmployeeStatus[] = [EmployeeStatus.ACTIVE, EmployeeStatu
  * long after anyone was watching.
  *
  * So the rule is an overlap between the employment period and the payroll
- * period, with one guard: a departed employee is only included when an end date
- * actually records when they left. A former employee with no end date has no
- * boundary at all, and including them would put someone who left years ago into
- * every period forever. That case is excluded and surfaces in the readiness
- * screen as missing data, which is the honest outcome - the fix is to record
- * the end date, not to guess it.
+ * period. Current status is intentionally irrelevant; the employee workflow
+ * requires an effective end date whenever somebody leaves.
  */
 export function isEmployeeEligibleForPayrollPeriod(
-  employee: Pick<Employee, 'status' | 'startDate' | 'endDate'> & { reactivatedAt?: Date | null },
+  employee: Pick<Employee, 'startDate' | 'endDate'> & { reactivatedAt?: Date | null },
   period: Pick<PayrollPeriod, 'startDate' | 'endDate'>
 ): boolean {
   // Hired (or returned) after the period closed: nothing to pay.
@@ -48,11 +41,7 @@ export function isEmployeeEligibleForPayrollPeriod(
   // Left before the period opened: nothing to pay.
   if (employee.endDate !== null && employee.endDate < period.startDate) return false;
 
-  if (WORKING_STATUSES.includes(employee.status)) return true;
-
-  // Departed. Payable for this period only if their leaving date says they were
-  // still employed during part of it.
-  return employee.endDate !== null;
+  return true;
 }
 
 export function payrollEligibleEmployeeWhere(
@@ -71,13 +60,71 @@ export function payrollEligibleEmployeeWhere(
       },
       // Employment had not already ended before the period opened.
       { OR: [{ endDate: null }, { endDate: { gte: period.startDate } }] },
-      // Either still working, or departed with a recorded leaving date.
-      {
-        OR: [
-          { status: { in: WORKING_STATUSES } },
-          { endDate: { not: null } },
-        ],
-      },
     ],
   };
+}
+
+/**
+ * Editable periods are live calculations and must follow current employment
+ * dates. Finalised periods are immutable snapshots: later employee master-data
+ * edits must never make an approved or paid row disappear from history.
+ */
+export function shouldApplyEmploymentOverlapToPayrollRows(
+  period: Pick<PayrollPeriod, 'status'>
+): boolean {
+  return ['DRAFT', 'ATTENDANCE_REVIEW', 'CALCULATED', 'REVIEW'].includes(period.status);
+}
+
+const HIDDEN_CURRENT_EMPLOYEE_STATUSES = ['INACTIVE', 'TERMINATED'] as const;
+
+/** Employee-side scope used by the current payroll page and its aggregates. */
+export function payrollVisibleEmployeeWhere(
+  period: Pick<PayrollPeriod, 'status' | 'startDate' | 'endDate'>,
+  options: { includeInactive?: boolean } = {}
+): Prisma.EmployeeWhereInput {
+  if (!shouldApplyEmploymentOverlapToPayrollRows(period)) return {};
+  return {
+    AND: [
+      payrollEligibleEmployeeWhere(period),
+      ...(options.includeInactive
+        ? []
+        : [{ status: { notIn: [...HIDDEN_CURRENT_EMPLOYEE_STATUSES] } } as Prisma.EmployeeWhereInput]),
+    ],
+  };
+}
+
+/** Shared relation filter for payroll row lists, counts, totals and reports. */
+export function payrollEmployeeVisibilityWhere(
+  period: Pick<PayrollPeriod, 'status' | 'startDate' | 'endDate'>,
+  extraEmployeeWhere?: Prisma.EmployeeWhereInput,
+  options: { includeInactive?: boolean } = {}
+): Prisma.PayrollEmployeeWhereInput {
+  const employeeConditions: Prisma.EmployeeWhereInput[] = [];
+  if (shouldApplyEmploymentOverlapToPayrollRows(period)) {
+    employeeConditions.push(payrollVisibleEmployeeWhere(period, options));
+  }
+  if (extraEmployeeWhere) employeeConditions.push(extraEmployeeWhere);
+  if (employeeConditions.length === 0) return {};
+  return {
+    employee: employeeConditions.length === 1
+      ? employeeConditions[0]
+      : { AND: employeeConditions },
+  };
+}
+
+/** In-memory counterpart used when several periods are loaded in one query. */
+export function visiblePayrollRowsForPeriod<T extends {
+  employee: Pick<Employee, 'startDate' | 'endDate'> & { reactivatedAt?: Date | null; status?: string };
+}>(
+  rows: T[],
+  period: Pick<PayrollPeriod, 'status' | 'startDate' | 'endDate'>,
+  options: { includeInactive?: boolean } = {}
+): T[] {
+  if (!shouldApplyEmploymentOverlapToPayrollRows(period)) return rows;
+  return rows.filter((row) =>
+    isEmployeeEligibleForPayrollPeriod(row.employee, period) &&
+    (options.includeInactive || !HIDDEN_CURRENT_EMPLOYEE_STATUSES.includes(
+      row.employee.status as typeof HIDDEN_CURRENT_EMPLOYEE_STATUSES[number]
+    ))
+  );
 }

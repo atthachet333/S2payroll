@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs';
 import { EmployeeStatus } from '@prisma/client';
 import {
   isEmployeeEligibleForPayrollPeriod,
+  payrollEmployeeVisibilityWhere,
   payrollEligibleEmployeeWhere,
+  shouldApplyEmploymentOverlapToPayrollRows,
+  visiblePayrollRowsForPeriod,
 } from '../src/services/employee-payroll-eligibility.service.js';
 
 /**
@@ -42,16 +45,16 @@ describe('payroll eligibility', () => {
     ).toBe(true);
   });
 
-  it('excludes a deactivated employee', () => {
+  it('does not let inactive status override open employment dates', () => {
     expect(
       isEmployeeEligibleForPayrollPeriod(employee({ status: EmployeeStatus.INACTIVE }), period)
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it('excludes a terminated employee', () => {
+  it('does not let terminated status override open employment dates', () => {
     expect(
       isEmployeeEligibleForPayrollPeriod(employee({ status: EmployeeStatus.TERMINATED }), period)
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('excludes someone who left before the period opened', () => {
@@ -124,16 +127,13 @@ describe('payroll eligibility', () => {
     ).toBe(false);
   });
 
-  it('excludes a former employee with no recorded leaving date', () => {
-    // No end date means no boundary, and including them would put somebody who
-    // left years ago into every period forever. The readiness screen surfaces
-    // this as missing data; the fix is to record the date, not to guess it.
+  it('treats a missing end date as open employment regardless of status', () => {
     expect(
       isEmployeeEligibleForPayrollPeriod(
         employee({ status: EmployeeStatus.INACTIVE, endDate: null }),
         period
       )
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('does not let current status alone erase historical period work', () => {
@@ -162,14 +162,59 @@ describe('payroll eligibility', () => {
     const where = payrollEligibleEmployeeWhere(period);
     // No top-level status filter: eligibility is decided by dates.
     expect((where as Record<string, unknown>).status).toBeUndefined();
-    const and = (where as { AND: { OR: Record<string, unknown>[] }[] }).AND;
-    // The status clause is a disjunction: still working, OR departed with a
-    // recorded leaving date.
-    const statusClause = and[2].OR;
-    expect(statusClause).toContainEqual({
-      status: { in: [EmployeeStatus.ACTIVE, EmployeeStatus.PROBATION] },
-    });
-    expect(statusClause).toContainEqual({ endDate: { not: null } });
+    const and = (where as { AND: unknown[] }).AND;
+    expect(and).toHaveLength(2);
+  });
+});
+
+describe('payroll employee row visibility', () => {
+  const september = {
+    status: 'CALCULATED' as const,
+    startDate: new Date('2026-09-01T00:00:00.000Z'),
+    endDate: new Date('2026-09-30T00:00:00.000Z'),
+  };
+  const rows = [
+    { id: 'ended-aug-31', net: 1000, employee: { status: 'INACTIVE', startDate: new Date('2026-01-01'), endDate: new Date('2026-08-31'), reactivatedAt: null } },
+    { id: 'ended-sep-15', net: 2000, employee: { status: 'INACTIVE', startDate: new Date('2026-01-01'), endDate: new Date('2026-09-15'), reactivatedAt: null } },
+    { id: 'future-start', net: 3000, employee: { status: 'ACTIVE', startDate: new Date('2026-10-01'), endDate: null, reactivatedAt: null } },
+    { id: 'active-current', net: 4000, employee: { status: 'ACTIVE', startDate: new Date('2026-01-01'), endDate: null, reactivatedAt: null } },
+    { id: 'terminated-current', net: 5000, employee: { status: 'TERMINATED', startDate: new Date('2026-01-01'), endDate: new Date('2026-09-30'), reactivatedAt: null } },
+  ];
+
+  it('shows ACTIVE while hiding INACTIVE, TERMINATED, and non-overlapping employees by default', () => {
+    expect(visiblePayrollRowsForPeriod(rows, september).map((row) => row.id)).toEqual(['active-current']);
+  });
+
+  it('the toggle shows inactive and terminated rows that still overlap the period', () => {
+    expect(
+      visiblePayrollRowsForPeriod(rows, september, { includeInactive: true }).map((row) => row.id)
+    ).toEqual(['ended-sep-15', 'active-current', 'terminated-current']);
+  });
+
+  it('uses the same visible rows for count and totals', () => {
+    const visible = visiblePayrollRowsForPeriod(rows, september);
+    expect(visible).toHaveLength(1);
+    expect(visible.reduce((total, row) => total + row.net, 0)).toBe(4000);
+  });
+
+  it('still shows a former employee in an overlapping August period', () => {
+    const august = { ...period, status: 'APPROVED' as const };
+    expect(visiblePayrollRowsForPeriod(rows, august).map((row) => row.id)).toContain('ended-aug-31');
+  });
+
+  it.each(['APPROVED', 'PAID', 'LOCKED'] as const)('preserves every %s snapshot row', (status) => {
+    const finalised = { ...september, status };
+    expect(shouldApplyEmploymentOverlapToPayrollRows(finalised)).toBe(false);
+    expect(payrollEmployeeVisibilityWhere(finalised)).toEqual({});
+    expect(visiblePayrollRowsForPeriod(rows, finalised)).toBe(rows);
+  });
+
+  it('adds the employee overlap relation to editable-period queries', () => {
+    const normal = JSON.stringify(payrollEmployeeVisibilityWhere(september));
+    const toggled = JSON.stringify(payrollEmployeeVisibilityWhere(september, undefined, { includeInactive: true }));
+    expect(normal).toContain('notIn');
+    expect(normal).toContain('INACTIVE');
+    expect(toggled).not.toContain('notIn');
   });
 });
 

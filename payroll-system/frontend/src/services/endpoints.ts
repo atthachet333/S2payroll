@@ -115,8 +115,8 @@ export const employeeApi = {
     unwrap<Employee>(api.post('/api/employees', data)),
   update: (id: string, data: Record<string, unknown>) =>
     unwrap<Employee>(api.patch(`/api/employees/${id}`, data)),
-  deactivate: (id: string, reason: string) =>
-    unwrap<Employee>(api.post(`/api/employees/${id}/deactivate`, { reason })),
+  deactivate: (id: string, data: { endDate: string; reason: string }) =>
+    unwrap<Employee>(api.post(`/api/employees/${id}/deactivate`, data)),
   payProfiles: (id: string) =>
     unwrap<EmployeePayProfile[]>(api.get(`/api/employees/${id}/pay-profiles`)),
   attendance: (id: string, params: { year: number; month: number; page?: number; pageSize?: number; status?: string }) =>
@@ -259,7 +259,7 @@ export interface WorkCalendar {
 // --- google sheets -----------------------------------------------------------
 
 export interface AutoSyncSourceStatus {
-  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+  status: 'IDLE' | 'RUNNING' | 'SUCCESS' | 'PARTIAL' | 'FAILED';
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
   lastSuccessfulAt: string | null;
@@ -340,7 +340,8 @@ export const payrollApi = {
     unwrap<PrePayrollReport>(api.get(`/api/payroll/periods/${id}/pre-check`)),
   suggestPeriod: (year: number, month: number) =>
     unwrap<PeriodSuggestion>(api.get('/api/payroll/periods/suggest', { params: { year, month } })),
-  getPeriod: (id: string) => unwrap<PeriodSummary>(api.get(`/api/payroll/periods/${id}`)),
+  getPeriod: (id: string, includeInactive = false) =>
+    unwrap<PeriodSummary>(api.get(`/api/payroll/periods/${id}`, { params: { includeInactive } })),
 
   startAttendanceReview: (id: string) =>
     unwrap<PayrollPeriod>(api.post(`/api/payroll/periods/${id}/attendance-review`)),
@@ -356,7 +357,14 @@ export const payrollApi = {
 
   listEmployees: (
     id: string,
-    params: { page?: number; pageSize?: number; search?: string; departmentId?: string; status?: string }
+    params: {
+      page?: number;
+      pageSize?: number;
+      search?: string;
+      departmentId?: string;
+      status?: string;
+      includeInactive?: boolean;
+    }
   ) => unwrap<Paginated<PayrollEmployee>>(api.get(`/api/payroll/periods/${id}/employees`, { params })),
   getEmployee: (id: string, employeeId: string) =>
     unwrap<PayrollEmployeeDetail>(api.get(`/api/payroll/periods/${id}/employees/${employeeId}`)),

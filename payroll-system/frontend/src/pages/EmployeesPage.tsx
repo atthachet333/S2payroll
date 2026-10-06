@@ -68,6 +68,7 @@ export default function EmployeesPage() {
   const [addingAttendance, setAddingAttendance] = React.useState<Employee | null>(null);
   const [viewing, setViewing] = React.useState<Employee | null>(null);
   const [deactivateReason, setDeactivateReason] = React.useState('');
+  const [deactivateEndDate, setDeactivateEndDate] = React.useState('');
 
   React.useEffect(() => setPage(1), [debouncedSearch, departmentId, status, employmentType, completeness]);
 
@@ -102,12 +103,16 @@ export default function EmployeesPage() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: () => employeeApi.deactivate(deactivating!.id, deactivateReason),
+    mutationFn: () => employeeApi.deactivate(deactivating!.id, {
+      endDate: deactivateEndDate,
+      reason: deactivateReason,
+    }),
     onSuccess: () => {
       toast.success('ปิดการใช้งานพนักงานเรียบร้อยแล้ว');
       void queryClient.invalidateQueries({ queryKey: ['employees'] });
       setDeactivating(null);
       setDeactivateReason('');
+      setDeactivateEndDate('');
     },
     onError: (err) => toast.error(apiErrorMessage(err)),
   });
@@ -359,6 +364,7 @@ export default function EmployeesPage() {
           if (!open) {
             setDeactivating(null);
             setDeactivateReason('');
+            setDeactivateEndDate('');
           }
         }}
         title="ปิดการใช้งานพนักงาน"
@@ -367,6 +373,10 @@ export default function EmployeesPage() {
         variant="destructive"
         loading={deactivateMutation.isPending}
         onConfirm={() => {
+          if (!deactivateEndDate) {
+            toast.error('กรุณาระบุวันที่สิ้นสุดการทำงาน');
+            return;
+          }
           if (deactivateReason.trim().length < 3) {
             toast.error('กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร');
             return;
@@ -374,6 +384,14 @@ export default function EmployeesPage() {
           deactivateMutation.mutate();
         }}
       >
+        <Field label="วันที่สิ้นสุดการทำงาน" required>
+          <Input
+            type="date"
+            value={deactivateEndDate}
+            min={deactivating?.startDate?.slice(0, 10)}
+            onChange={(e) => setDeactivateEndDate(e.target.value)}
+          />
+        </Field>
         <Field label="เหตุผล" required>
           <Textarea
             value={deactivateReason}

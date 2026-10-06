@@ -1,5 +1,5 @@
 import { EmploymentType, PayrollEmployeeStatus, PayrollItemKind } from '@prisma/client';
-import { Decimal, dec, money, minutesToHours, hours } from '../utils/money.js';
+import { Decimal, dec, finalPay, money, minutesToHours, hours } from '../utils/money.js';
 import type { PayrollSettings, TaxBracket } from './settings.service.js';
 import {
   priceAbsenceDeduction,
@@ -137,8 +137,16 @@ export interface DailyEarningsInput {
   amount: Decimal | string | number;
   /** The true observed duration across the period. */
   totalWorkedMinutes: number;
-  /** Unpaid breaks removed for days past the eight-hour threshold. */
+  /** Backwards-compatible total of the additional break deducted by the system. */
   totalBreakDeductionMinutes: number;
+  /** Observed positive gaps between completed work sessions. */
+  totalSessionGapMinutes: number;
+  /** Company-required break across finalized DAILY workdays. */
+  totalRequiredBreakMinutes: number;
+  /** Observed session gaps credited toward the required break. */
+  totalCreditedBreakMinutes: number;
+  /** Required break still deducted after credited session gaps. */
+  totalAdditionalBreakDeductionMinutes: number;
   /** Minutes actually paid for, after the break and the company floor. */
   totalPayableMinutes: number;
   /** What the floor discarded across the period. */
@@ -187,6 +195,10 @@ export interface CalculationResult {
    * come from an hourly count.
    */
   breakDeductionMinutes: number;
+  sessionGapMinutes: number;
+  requiredBreakMinutes: number;
+  creditedBreakMinutes: number;
+  additionalBreakDeductionMinutes: number;
   payableMinutes: number;
   /** What the company interval discarded from the daily worked time. */
   roundedAwayMinutes: number;
@@ -209,6 +221,10 @@ export interface CalculationResult {
   otherDeduction: Decimal;
   totalDeduction: Decimal;
 
+  netPayBeforeRounding: Decimal;
+  roundingAdjustment: Decimal;
+  payableNet: Decimal;
+  /** Backward-compatible API name; always the whole-baht payable amount. */
   netSalary: Decimal;
 
   incomes: CalculatedLine[];
@@ -574,7 +590,10 @@ export function calculatePayroll(
   );
 
   // --- 9. net -----------------------------------------------------------------
-  const netSalary = money(grossIncome.minus(totalDeduction));
+  const { netPayBeforeRounding, roundingAdjustment, payableNet } = finalPay(
+    grossIncome.minus(totalDeduction)
+  );
+  const netSalary = payableNet;
 
   // --- 10. line items ---------------------------------------------------------
   const incomes: CalculatedLine[] = [
@@ -739,6 +758,11 @@ export function calculatePayroll(
     dailyBase,
     hourlyBase,
     breakDeductionMinutes: input.dailyEarnings?.totalBreakDeductionMinutes ?? 0,
+    sessionGapMinutes: input.dailyEarnings?.totalSessionGapMinutes ?? 0,
+    requiredBreakMinutes: input.dailyEarnings?.totalRequiredBreakMinutes ?? 0,
+    creditedBreakMinutes: input.dailyEarnings?.totalCreditedBreakMinutes ?? 0,
+    additionalBreakDeductionMinutes:
+      input.dailyEarnings?.totalAdditionalBreakDeductionMinutes ?? 0,
     payableMinutes: input.dailyEarnings?.totalPayableMinutes ?? 0,
     roundedAwayMinutes: input.dailyEarnings?.totalRoundedAwayMinutes ?? 0,
     roundedLateMinutes: attendance.roundedLateMinutes,
@@ -761,6 +785,9 @@ export function calculatePayroll(
     loanDeduction,
     otherDeduction,
     totalDeduction,
+    netPayBeforeRounding,
+    roundingAdjustment,
+    payableNet,
     netSalary,
     incomes,
     deductions,

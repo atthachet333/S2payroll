@@ -324,14 +324,16 @@ const EMPLOYMENT_TYPE_LABEL: Record<string, string> = {
  */
 function drawPayBasis(doc: Doc, s: PayslipSnapshot): void {
   const hourly = s.pay.kind === 'HOURLY';
-  // Actual and paid hours are printed as two figures, never one. A day past
-  // eight hours loses an unpaid break and the remainder is floored, so showing
-  // paid hours alone would misstate what the employee actually worked.
+  // Actual and paid hours are printed as two figures, never one. DAILY break
+  // credit and floor rounding can make them differ without changing punches.
   const payable = s.pay.payableMinutes;
   const cells: [string, string][] = hourly
     ? [
         ['อัตราค่าจ้าง', s.pay.payConfigured ? `${fmt(s.pay.hourlyRate ?? 0)} บาท/ชม.` : 'ยังไม่กำหนด'],
         ['ชั่วโมงทำงานจริง', formatDuration(s.pay.workedMinutes)],
+        ...(s.employee.employmentType === 'DAILY'
+          ? [['ชั่วโมงพักที่หัก', formatDuration(s.pay.breakDeductionMinutes ?? 0)] as [string, string]]
+          : []),
         typeof payable === 'number' && payable > 0
           ? ['ชั่วโมงคิดค่าจ้าง', formatDuration(payable)]
           : ['ค่าจ้างตามเวลาทำงาน', s.pay.payConfigured ? `${fmt(baseAmount(s))} บาท` : '-'],

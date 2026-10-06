@@ -1,6 +1,5 @@
 import {
   EmploymentType,
-  PayType,
   type AttendanceRecord,
   type Department,
   type Employee,
@@ -10,7 +9,6 @@ import {
   type Position,
 } from '@prisma/client';
 import { prisma } from '../plugins/prisma.js';
-import { dec } from '../utils/money.js';
 import { companyClock, eachDay, formatDateOnly } from '../utils/datetime.js';
 import { isScheduledWorkday } from './schedule-policy.service.js';
 import { loadSettingsForDate, type PayrollSettings } from './settings.service.js';
@@ -19,6 +17,8 @@ import { payrollPoliciesByEmployee } from './employee-payroll-policy.service.js'
 import { computeDailyEarnings, type DailyEarningsSummary } from './daily-earnings.service.js';
 import { attendanceCloseMinutes, classifyOpenPunch } from '../utils/attendance-window.js';
 import { workTimePolicy } from '../utils/time-rounding.js';
+import { isUsablePayProfile } from './pay-profile-resolution.js';
+import { attachAttendanceSessions } from './attendance-sessions.service.js';
 
 /**
  * Everything one payroll period needs to know about one employee, gathered once
@@ -66,11 +66,7 @@ export function isUsableProfile(
   profile: EmployeePayProfile,
   employmentType: EmploymentType
 ): boolean {
-  if (!profile.isActive) return false;
-  if (employmentType === EmploymentType.MONTHLY || employmentType === EmploymentType.CONTRACT) {
-    return profile.payType === PayType.MONTHLY && dec(profile.monthlySalary ?? 0).greaterThan(0);
-  }
-  return profile.payType === PayType.HOURLY && dec(profile.hourlyRate ?? 0).greaterThan(0);
+  return isUsablePayProfile(profile, employmentType);
 }
 
 export async function loadPeriodContext(
@@ -128,8 +124,9 @@ export async function loadPeriodContext(
     list.push(profile);
     profilesByEmployee.set(profile.employeeId, list);
   }
-  const attendanceByEmployee = new Map<string, AttendanceRecord[]>();
-  for (const record of attendance) {
+  const sessionAttendance = await attachAttendanceSessions(attendance);
+  const attendanceByEmployee = new Map<string, typeof sessionAttendance>();
+  for (const record of sessionAttendance) {
     const list = attendanceByEmployee.get(record.employeeId) ?? [];
     list.push(record);
     attendanceByEmployee.set(record.employeeId, list);
@@ -148,7 +145,7 @@ export async function loadPeriodContext(
     // DAILY money is priced from payable minutes, so the period's policy has to
     // travel with it. MONTHLY staff never reach this branch.
     const dailyEarnings = hourly
-      ? computeDailyEarnings(records, usableProfiles, payableTimePolicy)
+      ? computeDailyEarnings(records, usableProfiles, payableTimePolicy, employee.employmentType)
       : null;
 
     // Staff exempt from both attendance and leave tracking are executives whose

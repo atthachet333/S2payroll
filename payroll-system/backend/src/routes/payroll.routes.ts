@@ -4,6 +4,7 @@ import {
   createPeriodSchema,
   markPaidSchema,
   periodEmployeeQuerySchema,
+  payrollVisibilityQuerySchema,
   unlockSchema,
   periodSuggestQuerySchema,
 } from '../schemas/index.js';
@@ -36,7 +37,8 @@ export default async function payrollRoutes(app: FastifyInstance): Promise<void>
     { preHandler: [app.requirePermission('payroll:read')] },
     async (request, reply) => {
       const { id } = request.params as { id: string };
-      return reply.send(await payrollService.periodSummary(id));
+      const query = payrollVisibilityQuerySchema.parse(request.query);
+      return reply.send(await payrollService.periodSummary(id, query));
     }
   );
 
