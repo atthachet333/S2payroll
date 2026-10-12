@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { CalendarClock, ChevronLeft, ChevronRight, History, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import dayjs from 'dayjs';
-import { attendanceApi, settingsApi, POLL_INTERVAL_MS } from '@/services/endpoints';
+import { attendanceApi, employeeApi, settingsApi, POLL_INTERVAL_MS } from '@/services/endpoints';
 import { apiErrorMessage } from '@/services/api';
 import { useAuth } from '@/features/auth/AuthContext';
 import SyncPanel from '@/features/attendance/SyncPanel';
@@ -37,6 +37,7 @@ import AttendanceSessions from '@/features/attendance/AttendanceSessions';
 import { AttendanceStatusBadge } from '@/components/StatusBadge';
 import { formatDate, formatDateTime, formatDateWithWeekday, formatMinutes, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
 import type { AttendanceRecord, AttendanceSummary } from '@/types';
+import { bangkokToday, monthRange } from '@/utils/bangkok';
 
 /**
  * Shortcuts onto the status filter. Counts come from the same summary the
@@ -59,15 +60,20 @@ export default function AttendancePage() {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
 
+  const initialBangkokMonth = React.useMemo(() => {
+    const today = bangkokToday();
+    return monthRange(today.year, today.month);
+  }, []);
   const [page, setPage] = React.useState(1);
-  const [from, setFrom] = React.useState(dayjs().startOf('month').format('YYYY-MM-DD'));
-  const [to, setTo] = React.useState(dayjs().endOf('month').format('YYYY-MM-DD'));
+  const [from, setFrom] = React.useState(initialBangkokMonth.from);
+  const [to, setTo] = React.useState(initialBangkokMonth.to);
   const [departmentId, setDepartmentId] = React.useState('');
   const [status, setStatus] = React.useState(searchParams.get('status') ?? '');
   const [employmentType, setEmploymentType] = React.useState('');
   const [search, setSearch] = React.useState('');
   const [editing, setEditing] = React.useState<AttendanceRecord | null>(null);
   const [deleting, setDeleting] = React.useState<AttendanceRecord | null>(null);
+  const [scheduleOverride, setScheduleOverride] = React.useState<AttendanceRecord | null>(null);
   const [recalcOpen, setRecalcOpen] = React.useState(false);
   const [calendarMonth, setCalendarMonth] = React.useState(dayjs().startOf('month'));
 
@@ -158,10 +164,10 @@ export default function AttendancePage() {
 
           <Card className="p-4">
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-6">
-              <Field label="ตั้งแต่วันที่">
+              <Field label="วันที่เริ่มต้น">
                 <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
               </Field>
-              <Field label="ถึงวันที่">
+              <Field label="วันที่สิ้นสุด">
                 <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
               </Field>
               <Field label="แผนก">
@@ -205,6 +211,18 @@ export default function AttendancePage() {
                   placeholder="รหัสหรือชื่อ"
                 />
               </Field>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setTo(from)}>
+                แสดงวันเดียว
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => {
+                const today = bangkokToday().iso;
+                setFrom(today);
+                setTo(today);
+              }}>
+                วันนี้ (กรุงเทพฯ)
+              </Button>
             </div>
 
             {/* Attendance rows store values derived at import time. A settings
@@ -354,6 +372,7 @@ export default function AttendancePage() {
                                 </Badge>
                               )}
                               {record.isLocked && <Badge variant="secondary">ล็อก</Badge>}
+                              {record.scheduleSource && <ScheduleSourceBadge source={record.scheduleSource} />}
                             </div>
                           </td>
                           <td className="num">
@@ -362,6 +381,15 @@ export default function AttendancePage() {
                           <td className="text-center">
                             {can('attendance:write') && !record.isLocked && (
                               <div className="flex items-center justify-center gap-0.5">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => setScheduleOverride(record)}
+                                  aria-label="กำหนดเวลาทำงานเฉพาะวัน"
+                                  title="กำหนดเวลาทำงานเฉพาะวัน"
+                                >
+                                  <CalendarClock className="h-4 w-4" />
+                                </Button>
                                 <Button
                                   variant="ghost"
                                   size="icon"
@@ -409,6 +437,7 @@ export default function AttendancePage() {
 
       <CorrectionDialog record={editing} onClose={() => setEditing(null)} />
       <DeleteAttendanceDialog record={deleting} onClose={() => setDeleting(null)} />
+      <WorkScheduleOverrideDialog record={scheduleOverride} onClose={() => setScheduleOverride(null)} />
       <ConfirmDialog
         open={recalcOpen}
         onOpenChange={setRecalcOpen}
@@ -419,6 +448,84 @@ export default function AttendancePage() {
         onConfirm={() => recalcMutation.mutate()}
       />
     </div>
+  );
+}
+
+function ScheduleSourceBadge({ source }: { source: AttendanceRecord['scheduleSource'] }) {
+  const labels = {
+    DATE_OVERRIDE: 'ตารางเฉพาะวัน',
+    EMPLOYEE: 'ตารางเฉพาะบุคคล',
+    COMPANY_PROFILE: 'ตารางบริษัท',
+    COMPANY_DEFAULT: 'ตารางบริษัท',
+  } as const;
+  return source ? <Badge variant="outline">{labels[source]}</Badge> : null;
+}
+
+function WorkScheduleOverrideDialog({ record, onClose }: { record: AttendanceRecord | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [workDate, setWorkDate] = React.useState('');
+  const [workStartTime, setWorkStartTime] = React.useState('08:30');
+  const [workEndTime, setWorkEndTime] = React.useState('17:30');
+  const [reason, setReason] = React.useState('');
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!record) return;
+    setWorkDate(record.workDate.slice(0, 10));
+    setWorkStartTime(record.expectedStart ?? '08:30');
+    setWorkEndTime(record.expectedEnd ?? '17:30');
+    setReason('');
+    setError(null);
+  }, [record]);
+
+  const mutation = useMutation({
+    mutationFn: () => employeeApi.createWorkScheduleOverride(record!.employeeId, {
+      workDate, workStartTime, workEndTime, reason: reason.trim(),
+    }),
+    onSuccess: (result) => {
+      toast.success(`บันทึกตารางเฉพาะวันแล้ว${result.recalculation.updated ? ' และประเมินข้อมูลวันนี้ใหม่แล้ว' : ''}`);
+      void queryClient.invalidateQueries({ queryKey: ['attendance'] });
+      void queryClient.invalidateQueries({ queryKey: ['attendance-summary'] });
+      void queryClient.invalidateQueries({ queryKey: ['work-calendar'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-work-schedule'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-work-schedule-overrides'] });
+      void queryClient.invalidateQueries({ queryKey: ['payroll-readiness'] });
+      onClose();
+    },
+    onError: (mutationError) => setError(apiErrorMessage(mutationError)),
+  });
+
+  return (
+    <Dialog open={Boolean(record)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent title="กำหนดเวลาทำงานเฉพาะวัน" className="max-w-md">
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            {record?.employeeCode} — {record?.employee ? `${record.employee.firstName} ${record.employee.lastName}` : ''}
+          </p>
+          <Field label="วันที่" required>
+            <Input type="date" value={workDate} onChange={(event) => setWorkDate(event.target.value)} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="เวลาเข้า" required>
+              <Input type="time" value={workStartTime} onChange={(event) => setWorkStartTime(event.target.value)} />
+            </Field>
+            <Field label="เวลาออก" required>
+              <Input type="time" value={workEndTime} onChange={(event) => setWorkEndTime(event.target.value)} />
+            </Field>
+          </div>
+          <Field label="เหตุผล" required>
+            <Textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3}
+              placeholder="เช่น ใช้เวลาทำงานปกติของบริษัทวันนี้" />
+          </Field>
+          {error && <p className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger-fg">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose}>ยกเลิก</Button>
+            <Button loading={mutation.isPending} disabled={!workDate || !workStartTime || !workEndTime || reason.trim().length < 3}
+              onClick={() => mutation.mutate()}>บันทึกตารางเฉพาะวัน</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

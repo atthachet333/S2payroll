@@ -90,6 +90,28 @@ export const deactivateSchema = z.object({
   reason: z.string().min(3, 'กรุณาระบุเหตุผล').max(500),
 });
 
+const workTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Expected a time (HH:mm)');
+
+export const employeeWorkScheduleSchema = z.object({
+  workStartTime: workTime,
+  workEndTime: workTime,
+  effectiveFrom: dateString,
+  effectiveTo: dateString.nullish(),
+});
+
+export const employeeWorkScheduleUpdateSchema = employeeWorkScheduleSchema.extend({
+  reason: z.string().trim().min(3, 'กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร').max(500).nullish(),
+});
+
+export const useCompanyWorkScheduleSchema = z.object({ effectiveFrom: dateString });
+
+export const employeeWorkScheduleOverrideSchema = z.object({
+  workDate: dateString,
+  workStartTime: workTime,
+  workEndTime: workTime,
+  reason: z.string().trim().min(3, 'กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร').max(500),
+});
+
 // --- attendance --------------------------------------------------------------
 
 export const attendanceStatusSchema = z.enum([
@@ -111,6 +133,8 @@ export const attendanceQuerySchema = paginationSchema.extend({
   employmentType: employmentTypeSchema.optional(),
   includeExempt: z.coerce.boolean().optional().default(false),
   search: z.string().optional(),
+}).refine((value) => !value.from || !value.to || value.from <= value.to, {
+  message: 'วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่มต้น', path: ['to'],
 });
 
 export const correctAttendanceSchema = z

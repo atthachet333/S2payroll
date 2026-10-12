@@ -9,7 +9,8 @@ import { prisma } from '../plugins/prisma.js';
 import { Decimal, dec, money } from '../utils/money.js';
 import { formatDateOnly } from '../utils/datetime.js';
 import { eachDay } from '../utils/datetime.js';
-import { loadSettingsForDate, type PayrollSettings } from './settings.service.js';
+import type { PayrollSettings } from './settings.service.js';
+import { createEmployeeWorkScheduleResolver } from './employee-work-schedule.service.js';
 import { rateForDate } from './daily-earnings.service.js';
 import { priceAbsenceDeduction, priceLateDeduction } from '../utils/deduction-pricing.js';
 import {
@@ -435,12 +436,8 @@ export async function valueAttendanceRecords(
     }
   }
 
-  // Settings are resolved per work date because the work-schedule profile that
-  // applies can differ across a range that spans a policy change.
-  const settingsByDate = new Map<string, PayrollSettings>();
-  for (const key of new Set(records.map((r) => formatDateOnly(r.workDate)))) {
-    settingsByDate.set(key, await loadSettingsForDate(new Date(`${key}T00:00:00.000Z`)));
-  }
+  // Resolve the same effective company/personal schedule used by attendance.
+  const resolveSchedule = await createEmployeeWorkScheduleResolver(employeeIds);
 
   for (const record of records) {
     const employee = employeesById.get(record.employeeId);
@@ -460,7 +457,7 @@ export async function valueAttendanceRecords(
         profiles: profilesByEmployee.get(record.employeeId) ?? [],
         policy: policyByEmployee.get(record.employeeId) ?? null,
         isUnpaidLeaveDay: unpaidLeaveDays.has(`${record.employeeId}|${dateKey}`),
-        settings: settingsByDate.get(dateKey)!,
+        settings: resolveSchedule(record.employeeId, record.workDate).settings,
       })
     );
   }

@@ -16,6 +16,7 @@ import { floorToInterval, roundingIntervalMinutes } from '../utils/time-rounding
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
 import { attachLeaveTypes } from './leave-display.service.js';
+import { createEmployeeWorkScheduleResolver } from './employee-work-schedule.service.js';
 
 export interface EmployeeListParams {
   /** Master-data completeness, evaluated by employee-completeness.service. */
@@ -468,6 +469,7 @@ export async function employeeAttendanceHistory(
   });
   const sessionItems = await attachAttendanceSessions(items);
   const effectiveItems = await attachLeaveTypes(sessionItems);
+  const resolveSchedule = await createEmployeeWorkScheduleResolver([id]);
   const valuations = await valueAttendanceRecords(
     effectiveItems.map((item) => ({
       id: item.id,
@@ -487,7 +489,11 @@ export async function employeeAttendanceHistory(
   );
 
   return {
-    items: effectiveItems.map((item) => ({ ...item, dailyPay: valuations.get(item.id) ?? null })),
+    items: effectiveItems.map((item) => {
+      const schedule = resolveSchedule(id, item.workDate);
+      return { ...item, dailyPay: valuations.get(item.id) ?? null,
+        expectedStart: schedule.workStartTime, expectedEnd: schedule.workEndTime, scheduleSource: schedule.source };
+    }),
     total,
     page,
     pageSize,

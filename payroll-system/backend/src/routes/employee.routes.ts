@@ -8,6 +8,10 @@ import {
   employeePayrollPolicySchema,
   reactivateEmployeeSchema,
   manualAttendanceSchema,
+  employeeWorkScheduleSchema,
+  employeeWorkScheduleUpdateSchema,
+  useCompanyWorkScheduleSchema,
+  employeeWorkScheduleOverrideSchema,
 } from '../schemas/index.js';
 import * as employeeService from '../services/employee.service.js';
 import * as attendanceService from '../services/attendance.service.js';
@@ -16,6 +20,7 @@ import * as payrollPolicyService from '../services/employee-payroll-policy.servi
 import { employeeDailyEarnings } from '../services/daily-earnings.service.js';
 import { getActor } from '../middleware/actor.js';
 import { dayjs } from '../utils/datetime.js';
+import * as workScheduleService from '../services/employee-work-schedule.service.js';
 
 export default async function employeeRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -81,6 +86,93 @@ export default async function employeeRoutes(app: FastifyInstance): Promise<void
     async (request, reply) => {
       const { id } = request.params as { id: string };
       return reply.send(await payProfileService.listPayProfiles(id));
+    }
+  );
+
+  app.get(
+    '/:id/work-schedule',
+    { preHandler: [app.requirePermission('employee:read')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const { date } = request.query as { date?: string };
+      const resolved = await workScheduleService.resolveEmployeeWorkSchedule(
+        id,
+        date ? dayjs.utc(date).startOf('day').toDate() : new Date()
+      );
+      const { settings: _settings, ...response } = resolved;
+      return reply.send(response);
+    }
+  );
+
+  app.get(
+    '/:id/work-schedules',
+    { preHandler: [app.requirePermission('employee:read')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      return reply.send(await workScheduleService.listEmployeeWorkSchedules(id));
+    }
+  );
+
+  app.get(
+    '/:id/work-schedule-overrides',
+    { preHandler: [app.requirePermission('employee:read')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      return reply.send(await workScheduleService.listEmployeeWorkScheduleOverrides(id));
+    }
+  );
+
+  app.post(
+    '/:id/work-schedule-overrides',
+    { preHandler: [app.requirePermission('attendance:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = employeeWorkScheduleOverrideSchema.parse(request.body);
+      const override = await workScheduleService.createEmployeeWorkScheduleOverride(id, body, getActor(request));
+      const workDate = dayjs.utc(body.workDate).startOf('day').toDate();
+      // Only this employee-day is re-derived. recalculateRange protects every
+      // APPROVED, PAID and LOCKED period and never writes source punches.
+      const recalculation = await attendanceService.recalculateRange(workDate, workDate, id);
+      const resolved = await workScheduleService.resolveEmployeeWorkSchedule(id, workDate);
+      const { settings: _settings, ...schedule } = resolved;
+      return reply.status(201).send({ override, schedule, recalculation });
+    }
+  );
+
+  app.post(
+    '/:id/work-schedules',
+    { preHandler: [app.requirePermission('employee:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = employeeWorkScheduleSchema.parse(request.body);
+      return reply.status(201).send(await workScheduleService.createEmployeeWorkSchedule(id, body, getActor(request)));
+    }
+  );
+
+  app.patch(
+    '/:id/work-schedules/:scheduleId',
+    { preHandler: [app.requirePermission('employee:write')] },
+    async (request, reply) => {
+      const { id, scheduleId } = request.params as { id: string; scheduleId: string };
+      const body = employeeWorkScheduleUpdateSchema.parse(request.body);
+      const schedule = await workScheduleService.updateEmployeeWorkSchedule(id, scheduleId, body, getActor(request));
+      // Only this employee's open window is re-derived. recalculateRange
+      // protects every APPROVED, PAID and LOCKED period and never writes
+      // source punches.
+      const recalculation = await attendanceService.recalculateRange(
+        schedule.effectiveFrom, schedule.effectiveTo ?? new Date(), id
+      );
+      return reply.send({ schedule, recalculation });
+    }
+  );
+
+  app.post(
+    '/:id/work-schedules/use-company-default',
+    { preHandler: [app.requirePermission('employee:write')] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = useCompanyWorkScheduleSchema.parse(request.body);
+      return reply.send(await workScheduleService.useCompanyWorkSchedule(id, body.effectiveFrom, getActor(request)));
     }
   );
 

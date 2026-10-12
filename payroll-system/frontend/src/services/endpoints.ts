@@ -33,6 +33,9 @@ import type {
   SyncHistoryItem,
   SyncResult,
   WorkScheduleProfile,
+  EmployeeWorkSchedule,
+  ResolvedEmployeeWorkSchedule,
+  EmployeeWorkScheduleOverride,
 } from '@/types';
 
 /** Typed wrappers over every REST endpoint the UI consumes. */
@@ -119,6 +122,28 @@ export const employeeApi = {
     unwrap<Employee>(api.post(`/api/employees/${id}/deactivate`, data)),
   payProfiles: (id: string) =>
     unwrap<EmployeePayProfile[]>(api.get(`/api/employees/${id}/pay-profiles`)),
+  workSchedule: (id: string, date?: string) =>
+    unwrap<ResolvedEmployeeWorkSchedule>(api.get(`/api/employees/${id}/work-schedule`, { params: { date } })),
+  workSchedules: (id: string) =>
+    unwrap<EmployeeWorkSchedule[]>(api.get(`/api/employees/${id}/work-schedules`)),
+  createWorkSchedule: (id: string, data: { workStartTime: string; workEndTime: string; effectiveFrom: string; effectiveTo?: string | null }) =>
+    unwrap<EmployeeWorkSchedule>(api.post(`/api/employees/${id}/work-schedules`, data)),
+  updateWorkSchedule: (
+    id: string,
+    scheduleId: string,
+    data: { workStartTime: string; workEndTime: string; effectiveFrom: string; effectiveTo?: string | null; reason?: string }
+  ) =>
+    unwrap<{ schedule: EmployeeWorkSchedule; recalculation: { updated: number; skippedLocked: number } }>(
+      api.patch(`/api/employees/${id}/work-schedules/${scheduleId}`, data)
+    ),
+  useCompanyWorkSchedule: (id: string, effectiveFrom: string) =>
+    unwrap<ResolvedEmployeeWorkSchedule>(api.post(`/api/employees/${id}/work-schedules/use-company-default`, { effectiveFrom })),
+  workScheduleOverrides: (id: string) =>
+    unwrap<EmployeeWorkScheduleOverride[]>(api.get(`/api/employees/${id}/work-schedule-overrides`)),
+  createWorkScheduleOverride: (id: string, data: { workDate: string; workStartTime: string; workEndTime: string; reason: string }) =>
+    unwrap<{ override: EmployeeWorkScheduleOverride; schedule: ResolvedEmployeeWorkSchedule; recalculation: { updated: number; skippedLocked: number } }>(
+      api.post(`/api/employees/${id}/work-schedule-overrides`, data)
+    ),
   attendance: (id: string, params: { year: number; month: number; page?: number; pageSize?: number; status?: string }) =>
     unwrap<Paginated<AttendanceRecord>>(api.get(`/api/employees/${id}/attendance`, { params })),
   createPayProfile: (id: string, data: Record<string, unknown>) =>

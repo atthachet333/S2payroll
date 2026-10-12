@@ -309,6 +309,9 @@ export interface AttendanceRecord {
   statusOverride?: boolean;
   isLocked: boolean;
   note: string | null;
+  expectedStart?: string;
+  expectedEnd?: string;
+  scheduleSource?: WorkScheduleSource;
   sessions?: AttendanceSession[];
   sessionCount?: number;
   completedWorkedMinutes?: number;
@@ -907,6 +910,40 @@ export interface WorkScheduleProfile {
   workEndTime: string;
   flexArrivalMinutes: number;
   isActive: boolean;
+}
+
+export type WorkScheduleSource = 'DATE_OVERRIDE' | 'EMPLOYEE' | 'COMPANY_PROFILE' | 'COMPANY_DEFAULT';
+
+export interface EmployeeWorkSchedule {
+  id: string;
+  employeeId: string;
+  workStartTime: string;
+  workEndTime: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  isActive: boolean;
+}
+
+export interface ResolvedEmployeeWorkSchedule {
+  employeeId: string;
+  workStartTime: string;
+  workEndTime: string;
+  source: WorkScheduleSource;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+}
+
+export interface EmployeeWorkScheduleOverride {
+  id: string;
+  employeeId: string;
+  workDate: string;
+  workStartTime: string;
+  workEndTime: string;
+  reason: string;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdByUser?: { id: string; firstName: string; lastName: string; email: string } | null;
 }
 
 export interface LeaveRecord {

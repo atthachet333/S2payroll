@@ -19,6 +19,7 @@ import { attendanceCloseMinutes, classifyOpenPunch } from '../utils/attendance-w
 import { workTimePolicy } from '../utils/time-rounding.js';
 import { isUsablePayProfile } from './pay-profile-resolution.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
+import { createEmployeeWorkScheduleResolver } from './employee-work-schedule.service.js';
 
 /**
  * Everything one payroll period needs to know about one employee, gathered once
@@ -85,6 +86,7 @@ export async function loadPeriodContext(
     orderBy: { employeeCode: 'asc' },
   });
   const employeeIds = employees.map((e) => e.id);
+  const resolveSchedule = await createEmployeeWorkScheduleResolver(employeeIds);
 
   const [profiles, policies, attendance, holidays] = await Promise.all([
     prisma.employeePayProfile.findMany({
@@ -163,7 +165,7 @@ export async function loadPeriodContext(
           workDate: r.workDate,
           checkIn: r.checkIn,
           checkOut: r.checkOut,
-          closeMinutes,
+          closeMinutes: attendanceCloseMinutes(resolveSchedule(employee.id, r.workDate).settings),
         }) !== 'IN_PROGRESS'
     ).length;
 

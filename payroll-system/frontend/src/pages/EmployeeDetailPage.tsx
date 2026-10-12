@@ -39,7 +39,7 @@ import {
   TabsTrigger,
 } from '@/components/ui';
 import { EmployeeStatusBadge, EMPLOYMENT_TYPE_LABELS } from '@/components/StatusBadge';
-import { formatDate, formatDateWithWeekday, formatMinutes, formatMoney, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
+import { formatDate, formatDateTime, formatDateWithWeekday, formatMinutes, formatMoney, formatNumber, formatTime, thaiMonthName } from '@/utils/format';
 import { AttendanceStatusBadge } from '@/components/StatusBadge';
 import type { DailyEarnings } from '@/types';
 
@@ -97,6 +97,16 @@ export default function EmployeeDetailPage() {
   const policyQuery = useQuery({
     queryKey: ['employee-payroll-policy', id],
     queryFn: () => employeeApi.payrollPolicy(id),
+    enabled: Boolean(id),
+  });
+  const scheduleQuery = useQuery({
+    queryKey: ['employee-work-schedule', id],
+    queryFn: () => employeeApi.workSchedule(id),
+    enabled: Boolean(id),
+  });
+  const scheduleOverridesQuery = useQuery({
+    queryKey: ['employee-work-schedule-overrides', id],
+    queryFn: () => employeeApi.workScheduleOverrides(id),
     enabled: Boolean(id),
   });
   // Per-day earnings for hourly staff. The API answers applicable:false for
@@ -197,6 +207,9 @@ export default function EmployeeDetailPage() {
                 <InfoRow label="สถานะค่าจ้าง" value={currentPayProfile ? 'พร้อมใช้งาน' : 'ยังไม่ได้กำหนด'} />
                 <InfoRow label={currentPayProfile?.payType === 'MONTHLY' || (!currentPayProfile && ['MONTHLY', 'CONTRACT'].includes(employee.employmentType)) ? 'เงินเดือนปัจจุบัน' : 'ค่าจ้างต่อชั่วโมงปัจจุบัน'} value={currentPayProfile ? `${formatMoney(currentPayProfile.payType === 'MONTHLY' ? currentPayProfile.monthlySalary : currentPayProfile.hourlyRate)} บาท${currentPayProfile.payType === 'MONTHLY' ? ' / เดือน' : ' / ชั่วโมง'}` : '-'} />
                 <InfoRow label="เริ่มใช้วันที่" value={currentPayProfile ? formatDate(currentPayProfile.effectiveFrom) : '-'} />
+                <InfoRow label="เวลาทำงาน" value={scheduleQuery.data ? `${scheduleQuery.data.workStartTime}–${scheduleQuery.data.workEndTime}` : '-'} />
+                <InfoRow label="แหล่งตารางเวลา" value={scheduleQuery.data?.source === 'DATE_OVERRIDE' ? 'ตารางเฉพาะวัน' : scheduleQuery.data?.source === 'EMPLOYEE' ? 'ตารางเฉพาะบุคคล' : 'ตารางบริษัท'} />
+                <InfoRow label="ตารางเริ่มใช้" value={scheduleQuery.data?.effectiveFrom ? formatDate(scheduleQuery.data.effectiveFrom) : '-'} />
                 {/* Derived from the salary, not stored against it: the employee
                     is still paid monthly. These are the bases the deduction
                     rules price against. */}
@@ -218,6 +231,21 @@ export default function EmployeeDetailPage() {
                 <InfoRow label="ต้องลงเวลา" value={employee.attendanceRequired ? 'ใช่' : 'ยกเว้น'} />
                 <InfoRow label="ติดตามวันลา" value={employee.leaveTrackingRequired ? 'ใช่' : 'ยกเว้น'} />
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>ประวัติตารางเฉพาะวัน</CardTitle></CardHeader>
+            <CardContent>
+              {scheduleOverridesQuery.data?.length ? (
+                <div className="overflow-x-auto"><table className="data-table"><thead><tr><th>วันที่</th><th>เวลา</th><th>เหตุผล</th><th>ผู้บันทึก</th><th>บันทึกเมื่อ</th></tr></thead><tbody>
+                  {scheduleOverridesQuery.data.map((row) => <tr key={row.id}>
+                    <td>{formatDate(row.workDate)}</td><td className="whitespace-nowrap tabular-nums">{row.workStartTime}–{row.workEndTime}</td>
+                    <td>{row.reason}</td><td>{row.createdByUser ? `${row.createdByUser.firstName} ${row.createdByUser.lastName}`.trim() || row.createdByUser.email : '-'}</td>
+                    <td>{formatDateTime(row.createdAt)}</td>
+                  </tr>)}
+                </tbody></table></div>
+              ) : <EmptyState title="ยังไม่มีตารางเฉพาะวัน" description="เพิ่มได้จากรายการลงเวลาของวันที่ต้องการ" />}
             </CardContent>
           </Card>
 

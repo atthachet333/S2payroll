@@ -15,6 +15,7 @@ import { getDayType, isScheduledWorkday } from './schedule-policy.service.js';
 import { valueAttendanceRecords } from './attendance-valuation.service.js';
 import { attachAttendanceSessions } from './attendance-sessions.service.js';
 import { attachLeaveTypes } from './leave-display.service.js';
+import { createEmployeeWorkScheduleResolver, resolveEmployeeWorkSchedule } from './employee-work-schedule.service.js';
 
 export interface AttendanceMetrics {
   workedMinutes: number;
@@ -311,8 +312,8 @@ export interface AttendanceListParams {
   search?: string;
 }
 
-export async function listAttendance(params: AttendanceListParams) {
-  const where: Prisma.AttendanceRecordWhereInput = {
+export function buildAttendanceWhere(params: AttendanceListParams): Prisma.AttendanceRecordWhereInput {
+  return {
     ...(params.employeeId ? { employeeId: params.employeeId } : {}),
     ...(params.status ? { status: params.status } : {}),
     ...(!params.includeExempt || params.departmentId || params.employmentType
@@ -340,6 +341,12 @@ export async function listAttendance(params: AttendanceListParams) {
         }
       : {}),
   };
+}
+
+export async function listAttendance(params: AttendanceListParams) {
+  // The identical predicate is passed to both findMany and count, so date,
+  // employee, status and search filters cannot disagree with pagination totals.
+  const where = buildAttendanceWhere(params);
 
   const [items, total] = await Promise.all([
     prisma.attendanceRecord.findMany({
@@ -369,13 +376,17 @@ export async function listAttendance(params: AttendanceListParams) {
   ]);
 
   const clock = companyClock();
-  const todaySettings = await loadSettingsForDate(new Date(`${clock.date}T00:00:00.000Z`));
-  const closeMinutes = monthlyEndMinutes(todaySettings) + Math.max(0, todaySettings.number('ATTENDANCE_CLOSE_GRACE_MINUTES'));
+  const resolveSchedule = await createEmployeeWorkScheduleResolver(items.map((item) => item.employeeId));
   const sessionItems = await attachAttendanceSessions(items.map((item) => ({
     ...item,
+    expectedStart: resolveSchedule(item.employeeId, item.workDate).workStartTime,
+    expectedEnd: resolveSchedule(item.employeeId, item.workDate).workEndTime,
+    scheduleSource: resolveSchedule(item.employeeId, item.workDate).source,
     status:
       item.status === 'MISSING_DATA' && item.checkIn && !item.checkOut &&
-      formatDateOnly(item.workDate) === clock.date && clock.minutes < closeMinutes
+      formatDateOnly(item.workDate) === clock.date && clock.minutes <
+        monthlyEndMinutes(resolveSchedule(item.employeeId, item.workDate).settings) +
+        Math.max(0, resolveSchedule(item.employeeId, item.workDate).settings.number('ATTENDANCE_CLOSE_GRACE_MINUTES'))
         ? 'IN_PROGRESS' as const
         : item.status,
   })));
@@ -429,6 +440,7 @@ export async function getAttendanceById(id: string) {
     },
   });
   if (!record) throw notFound('Attendance record');
+  const schedule = await resolveEmployeeWorkSchedule(record.employeeId, record.workDate);
 
   // adjustments.changedBy holds a user id; the history panel needs a person.
   // Resolved here rather than joined, because the column is a plain id with no
@@ -448,6 +460,9 @@ export async function getAttendanceById(id: string) {
   const [withLeaveType] = await attachLeaveTypes([withSessions]);
   return {
     ...withLeaveType,
+    expectedStart: schedule.workStartTime,
+    expectedEnd: schedule.workEndTime,
+    scheduleSource: schedule.source,
     adjustments: record.adjustments.map((a) => ({
       ...a,
       changedByName: editorById.get(a.changedBy) ?? null,
@@ -665,7 +680,7 @@ export async function correctAttendance(
   const nextCheckIn = parsePunch(input.checkIn, record.checkIn);
   const nextCheckOut = parsePunch(input.checkOut, record.checkOut);
 
-  const settings = await loadSettings();
+  const settings = (await resolveEmployeeWorkSchedule(record.employeeId, workDate)).settings;
   const [leave] = await prisma.leaveRecord.findMany({
     where: {
       employeeId: record.employeeId,
@@ -1133,6 +1148,9 @@ export async function recalculateRange(from: Date, to: Date, employeeId?: string
     (record) => !finalisedPeriods.some((period) => period.startDate <= record.workDate && period.endDate >= record.workDate)
   );
   const skippedFinalised = candidateRecords.length - records.length;
+  const resolveSchedule = await createEmployeeWorkScheduleResolver([
+    ...new Set([...records.map((record) => record.employeeId), ...candidateRecords.map((record) => record.employeeId)]),
+  ]);
 
   const leaves = await prisma.leaveRecord.findMany({
     where: { status: 'APPROVED', startDate: { lte: to }, endDate: { gte: from }, employee: { leaveTrackingRequired: true } },
@@ -1158,7 +1176,7 @@ export async function recalculateRange(from: Date, to: Date, employeeId?: string
       cursor = cursor.add(1, 'day')
     ) {
       const candidate = cursor.startOf('day').toDate();
-      const settings = await loadSettingsForDate(candidate);
+      const settings = resolveSchedule(leave.employeeId, candidate).settings;
       const dateKey = cursor.format('YYYY-MM-DD');
       if (!holidaySet.has(dateKey) && isScheduledWorkday(candidate, settings)) {
         coveredDates.push(dateKey);
@@ -1172,7 +1190,7 @@ export async function recalculateRange(from: Date, to: Date, employeeId?: string
 
   let updated = 0;
   for (const record of records) {
-    const settings = await loadSettingsForDate(record.workDate);
+    const settings = resolveSchedule(record.employeeId, record.workDate).settings;
     const metrics = computeAttendanceMetrics(
       {
         workDate: record.workDate,
@@ -1325,7 +1343,7 @@ export async function createManualAttendance(
   const checkOut = parsePunchOnDate(input.checkOut, workDate);
   if (!checkIn && !checkOut) throw badRequest('กรุณาระบุเวลาเข้าหรือเวลาออกอย่างน้อยหนึ่งค่า');
 
-  const settings = await loadSettingsForDate(workDate);
+  const settings = (await resolveEmployeeWorkSchedule(employeeId, workDate)).settings;
   const [holiday] = await prisma.holiday.findMany({ where: { date: workDate }, take: 1 });
   const [leave] = await prisma.leaveRecord.findMany({
     where: {

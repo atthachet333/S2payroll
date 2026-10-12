@@ -191,6 +191,11 @@ export default function EmployeeDetailDrawer({
     queryFn: () => employeeApi.payProfiles(employee!.id),
     enabled: Boolean(employee),
   });
+  const scheduleQuery = useQuery({
+    queryKey: ['employee-work-schedule', employee?.id],
+    queryFn: () => employeeApi.workSchedule(employee!.id),
+    enabled: Boolean(employee),
+  });
 
   const detail = query.data;
   const completeness = detail?.profileCompleteness;
@@ -331,6 +336,9 @@ export default function EmployeeDetailDrawer({
                       <Field label="แผนก" value={detail.department?.name ?? '-'} />
                       <Field label="ตำแหน่ง" value={detail.position?.name ?? '-'} />
                       <Field label="วันที่เริ่มงาน" value={formatDate(detail.startDate)} />
+                      <Field label="เวลาทำงาน" value={scheduleQuery.data ? `${scheduleQuery.data.workStartTime}–${scheduleQuery.data.workEndTime}` : '-'} />
+                      <Field label="แหล่งตารางเวลา" value={scheduleQuery.data?.source === 'DATE_OVERRIDE' ? 'ตารางเฉพาะวัน' : scheduleQuery.data?.source === 'EMPLOYEE' ? 'ตารางเฉพาะบุคคล' : 'ตารางบริษัท'} />
+                      {scheduleQuery.data?.effectiveFrom && <Field label="ตารางเริ่มใช้" value={formatDate(scheduleQuery.data.effectiveFrom)} />}
                       <Field
                         label="สถานะ"
                         value={

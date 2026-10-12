@@ -61,6 +61,11 @@ interface FormState {
   payProfileAmount: string;
   payEffectiveFrom: string;
   policy: PolicyFormState;
+  scheduleMode: 'COMPANY' | 'EMPLOYEE';
+  workStartTime: string;
+  workEndTime: string;
+  scheduleEffectiveFrom: string;
+  scheduleReason: string;
 }
 
 const emptyForm = (): FormState => ({
@@ -92,6 +97,11 @@ const emptyForm = (): FormState => ({
   payProfileAmount: '',
   payEffectiveFrom: '',
   policy: emptyPolicyForm(),
+  scheduleMode: 'COMPANY',
+  workStartTime: '08:30',
+  workEndTime: '17:30',
+  scheduleEffectiveFrom: formatIsoDate(new Date()),
+  scheduleReason: '',
 });
 
 const fromEmployee = (e: Employee): FormState => ({
@@ -123,6 +133,11 @@ const fromEmployee = (e: Employee): FormState => ({
   payProfileAmount: '',
   payEffectiveFrom: formatIsoDate(new Date()),
   policy: emptyPolicyForm(),
+  scheduleMode: 'COMPANY',
+  workStartTime: '08:30',
+  workEndTime: '17:30',
+  scheduleEffectiveFrom: formatIsoDate(new Date()),
+  scheduleReason: '',
 });
 
 export default function EmployeeFormDialog({
@@ -174,6 +189,16 @@ export default function EmployeeFormDialog({
     queryFn: () => employeeApi.payrollPolicy(employee!.id),
     enabled: open && Boolean(employee?.id),
   });
+  const scheduleQuery = useQuery({
+    queryKey: ['employee-work-schedule', employee?.id],
+    queryFn: () => employeeApi.workSchedule(employee!.id),
+    enabled: open && Boolean(employee?.id),
+  });
+  const scheduleHistoryQuery = useQuery({
+    queryKey: ['employee-work-schedules', employee?.id],
+    queryFn: () => employeeApi.workSchedules(employee!.id),
+    enabled: open && Boolean(employee?.id),
+  });
 
   // The saved policy is kept so the submit path can tell an actual edit from an
   // untouched form and skip the write entirely when nothing changed.
@@ -199,6 +224,18 @@ export default function EmployeeFormDialog({
       payEffectiveFrom: active ? formatIsoDate(active.effectiveFrom) : '',
     }));
   }, [open, employee, payProfilesQuery.data]);
+
+  React.useEffect(() => {
+    if (!open || !employee || !scheduleQuery.data) return;
+    const schedule = scheduleQuery.data;
+    setForm((current) => ({
+      ...current,
+      scheduleMode: schedule.source === 'EMPLOYEE' ? 'EMPLOYEE' : 'COMPANY',
+      workStartTime: schedule.workStartTime,
+      workEndTime: schedule.workEndTime,
+      scheduleEffectiveFrom: schedule.effectiveFrom ? formatIsoDate(schedule.effectiveFrom) : formatIsoDate(new Date()),
+    }));
+  }, [open, employee, scheduleQuery.data]);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -259,6 +296,26 @@ export default function EmployeeFormDialog({
         if (!policyFormsEqual(form.policy, savedPolicy)) {
           await employeeApi.savePayrollPolicy(saved.id, policyFormToInput(form.policy));
         }
+        if (form.scheduleMode === 'EMPLOYEE') {
+          const sameStart = scheduleHistoryQuery.data?.find((row) => row.isActive && formatIsoDate(row.effectiveFrom) === form.scheduleEffectiveFrom);
+          if (!sameStart) {
+            await employeeApi.createWorkSchedule(saved.id, {
+              workStartTime: form.workStartTime, workEndTime: form.workEndTime,
+              effectiveFrom: form.scheduleEffectiveFrom,
+            });
+          } else if (sameStart.workStartTime !== form.workStartTime || sameStart.workEndTime !== form.workEndTime) {
+            // Same effective date, different times: update the existing row
+            // in place instead of re-creating it (which the backend would
+            // reject as a duplicate effective-dated schedule).
+            await employeeApi.updateWorkSchedule(saved.id, sameStart.id, {
+              workStartTime: form.workStartTime, workEndTime: form.workEndTime,
+              effectiveFrom: form.scheduleEffectiveFrom,
+              reason: form.scheduleReason || undefined,
+            });
+          }
+        } else if (scheduleQuery.data?.source === 'EMPLOYEE') {
+          await employeeApi.useCompanyWorkSchedule(saved.id, form.scheduleEffectiveFrom);
+        }
         return saved;
       }
       const saved = await employeeApi.create({ ...payload, employeeCode: form.employeeCode });
@@ -275,6 +332,12 @@ export default function EmployeeFormDialog({
           isActive: true,
         });
       }
+      if (form.scheduleMode === 'EMPLOYEE') {
+        await employeeApi.createWorkSchedule(saved.id, {
+          workStartTime: form.workStartTime, workEndTime: form.workEndTime,
+          effectiveFrom: form.scheduleEffectiveFrom,
+        });
+      }
       return saved;
     },
     onSuccess: () => {
@@ -288,6 +351,10 @@ export default function EmployeeFormDialog({
       void queryClient.invalidateQueries({ queryKey: ['employee-payroll-policies'] });
       void queryClient.invalidateQueries({ queryKey: ['employee-daily-earnings'] });
       void queryClient.invalidateQueries({ queryKey: ['pay-configurations'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-work-schedule'] });
+      void queryClient.invalidateQueries({ queryKey: ['employee-work-schedules'] });
+      void queryClient.invalidateQueries({ queryKey: ['attendance'] });
+      void queryClient.invalidateQueries({ queryKey: ['payroll-readiness'] });
       onOpenChange(false);
     },
     onError: (err) => setError(apiErrorMessage(err)),
@@ -427,6 +494,32 @@ export default function EmployeeFormDialog({
                   onChange={(e) => set('endDate', e.target.value)}
                 />
               </Field>
+              <div className="rounded-lg border border-border bg-secondary/30 p-3 sm:col-span-2">
+                <p className="text-sm font-medium">ตารางเวลาทำงาน</p>
+                <p className="mt-1 text-xs text-muted-foreground">กำหนดแบบมีวันที่เริ่มใช้ ประวัติเดิมจะถูกปิดช่วงโดยอัตโนมัติ</p>
+              </div>
+              <Field label="แหล่งตารางเวลา" required>
+                <Select value={form.scheduleMode} onChange={(e) => set('scheduleMode', e.target.value as 'COMPANY' | 'EMPLOYEE')}>
+                  <option value="COMPANY">ใช้ตารางบริษัท</option>
+                  <option value="EMPLOYEE">กำหนดเฉพาะพนักงาน</option>
+                </Select>
+              </Field>
+              <Field label="วันที่เริ่มใช้" required>
+                <Input type="date" value={form.scheduleEffectiveFrom} onChange={(e) => set('scheduleEffectiveFrom', e.target.value)} required />
+              </Field>
+              {form.scheduleMode === 'EMPLOYEE' && <>
+                <Field label="เวลาเข้างาน" required>
+                  <Input type="time" value={form.workStartTime} onChange={(e) => set('workStartTime', e.target.value)} required />
+                </Field>
+                <Field label="เวลาเลิกงาน" required>
+                  <Input type="time" value={form.workEndTime} onChange={(e) => set('workEndTime', e.target.value)} required />
+                </Field>
+                {isEdit && (
+                  <Field label="เหตุผลการแก้ไขตารางเวลา (ถ้ามีการแก้ไขเวลา)" className="sm:col-span-2">
+                    <Input value={form.scheduleReason} onChange={(e) => set('scheduleReason', e.target.value)} />
+                  </Field>
+                )}
+              </>}
               <Field label="หมายเหตุ" className="sm:col-span-2">
                 <Textarea value={form.note} onChange={(e) => set('note', e.target.value)} rows={2} />
               </Field>

@@ -86,6 +86,8 @@ export async function loadSettingsForDate(date: Date): Promise<PayrollSettings> 
   return new PayrollSettings({
     ...base.raw(),
     WORKING_DAYS: profile.workingDays,
+    MONTHLY_WORK_START_TIME: profile.workStartTime,
+    MONTHLY_WORK_END_TIME: profile.workEndTime,
     WORK_START_TIME: profile.workStartTime,
     WORK_END_TIME: profile.workEndTime,
     LATE_GRACE_MINUTES: String(profile.flexArrivalMinutes),

@@ -4,6 +4,7 @@ import { AttendanceSource, SyncStatus } from '@prisma/client';
 import { prisma } from '../plugins/prisma.js';
 import { attendanceRange, env, googlePrivateKey, isGoogleSheetsConfigured } from '../config/env.js';
 import { loadSettings } from './settings.service.js';
+import { createEmployeeWorkScheduleResolver } from './employee-work-schedule.service.js';
 import { computeAttendanceMetrics } from './attendance.service.js';
 import { isScheduledWorkday } from './schedule-policy.service.js';
 import { recordAudit } from './audit.service.js';
@@ -331,6 +332,7 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
     const byCode = new Map(
       employees.map((e) => [e.employeeCode, { ...e, name: `${e.firstName} ${e.lastName}` }])
     );
+    const resolveSchedule = await createEmployeeWorkScheduleResolver(employees.map((employee) => employee.id));
 
     const holidays = await prisma.holiday.findMany();
     const holidaySet = new Set(holidays.map((h) => dayjs.utc(h.date).format('YYYY-MM-DD')));
@@ -589,8 +591,9 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
       const checkOut = parseSheetTime(workDate, row.checkOut);
 
       const dateKey = dayjs.utc(workDate).format('YYYY-MM-DD');
+      const effectiveSettings = resolveSchedule(employee.id, workDate).settings;
       const isHoliday = holidaySet.has(dateKey);
-      const weekend = !isScheduledWorkday(workDate, settings);
+      const weekend = !isScheduledWorkday(workDate, effectiveSettings);
       const isOnLeave = leaves.some(
         (l) => l.employeeId === employee.id && l.startDate <= workDate && l.endDate >= workDate
       );
@@ -609,7 +612,7 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
           hasOpenSession: row.hasOpenSession,
           malformedSequence: row.malformedSequence,
         },
-        settings
+        effectiveSettings
       );
 
       // Compare the complete derived day, not merely its first IN/last OUT.
@@ -621,6 +624,11 @@ export async function syncAttendance(options: SyncOptions): Promise<SyncResult> 
         existing.originalCheckIn?.getTime() === checkIn?.getTime() &&
         existing.originalCheckOut?.getTime() === checkOut?.getTime() &&
         existing.workedMinutes === metrics.workedMinutes &&
+        existing.normalMinutes === metrics.normalMinutes &&
+        existing.otMinutes === metrics.otMinutes &&
+        existing.breakMinutes === metrics.breakMinutes &&
+        existing.lateMinutes === metrics.lateMinutes &&
+        existing.earlyLeaveMinutes === metrics.earlyLeaveMinutes &&
         existing.status === metrics.status &&
         existing.isMissingCheckIn === metrics.isMissingCheckIn &&
         existing.isMissingCheckOut === metrics.isMissingCheckOut
